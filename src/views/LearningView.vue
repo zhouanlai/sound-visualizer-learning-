@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useRecordingStore } from '@/stores/recording'
 import { useUserStore } from '@/stores/user'
+import { getUnitMeta } from '@/data/pinyinUnits'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,7 +27,22 @@ const unitData: Record<string, any> = {
 }
 
 const unitId = computed(() => route.params.id as string)
-const unit = computed(() => unitData[unitId.value] || unitData.ma)
+// 优先取手工教学数据；未收录的拼音单元（发音库/地图全量单元）自动从共享数据兜底
+const unit = computed(() => {
+  const known = unitData[unitId.value]
+  if (known) return known
+  const meta = getUnitMeta(unitId.value)
+  if (meta) {
+    return {
+      pinyin: meta.tone,
+      character: meta.char,
+      tone: 1,
+      desc: `${unitId.value} 发音练习`,
+      detail: '点击「播放示范」听标准发音，然后按下录音按钮练习。对照反馈页的评分与可视化结果不断改进。',
+    }
+  }
+  return unitData.ma
+})
 const isPlaying = ref(false)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const pitchHistory = ref<number[]>([])

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { PINYIN_UNITS } from '@/data/pinyinUnits'
 
 const router = useRouter()
 const searchQuery = ref('')
@@ -27,13 +28,13 @@ const tones = [
   { mark: 'ˋ', name: '第四声（去声）', color: '#3498db' },
 ]
 
-// 首版12个发音单元
-const availableUnits: Record<string, string> = {
-  'ma': '妈', 'ba': '八', 'pa': '趴', 'ta': '他',
-  'yi': '一', 'wu': '五', 'yu': '鱼',
-  'mao': '猫', 'gou': '狗', 'niao': '鸟',
-  'mā': '妈', 'má': '麻'
-}
+// 可学习单元：由共享拼音数据派生（key = 声母+韵母，value = 代表汉字）
+const availableUnits: Record<string, string> = Object.fromEntries(
+  Object.entries(PINYIN_UNITS).map(([k, v]) => [k, v.char])
+)
+
+// 可学习单元总数（自动统计）
+const availableCount = Object.keys(availableUnits).length
 
 function isAvailable(initial: string, finalChar: string): boolean {
   return `${initial}${finalChar}` in availableUnits
@@ -65,7 +66,7 @@ const filteredFinals = computed(() => {
   <div class="pronunciation-map">
     <div class="map-header">
       <h3>发音地图</h3>
-      <p>点击可学习的拼音单元开始练习（共12个首版发音单元）</p>
+      <p>点击可学习的拼音单元开始练习（共 {{ availableCount }} 个发音单元）</p>
       <el-input
         v-model="searchQuery"
         placeholder="搜索拼音..."

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { PINYIN_UNITS, TONE_UNITS } from '@/data/pinyinUnits'
 
 const router = useRouter()
 const searchQuery = ref('')
@@ -16,7 +17,8 @@ interface PronunciationUnit {
   progress: number
 }
 
-const units: PronunciationUnit[] = [
+// 手工精选单元（保留演示进度数据）
+const featuredUnits: PronunciationUnit[] = [
   { id: 'ma', pinyin: 'ma', character: '妈', pinyinTone: 'mā', description: '双唇音+开口呼', category: 'initial', color: '#409eff', progress: 85 },
   { id: 'ba', pinyin: 'ba', character: '八', pinyinTone: 'bā', description: '双唇音+开口呼', category: 'initial', color: '#409eff', progress: 72 },
   { id: 'pa', pinyin: 'pa', character: '趴', pinyinTone: 'pā', description: '双唇音+开口呼', category: 'initial', color: '#409eff', progress: 0 },
@@ -30,6 +32,77 @@ const units: PronunciationUnit[] = [
   { id: 'ma_t2', pinyin: 'ma', character: '麻', pinyinTone: 'má', description: '第二声练习', category: 'tone', color: '#e6a23c', progress: 0 },
   { id: 'ma_t3', pinyin: 'ma', character: '马', pinyinTone: 'mǎ', description: '第三声练习', category: 'tone', color: '#e6a23c', progress: 0 },
 ]
+
+// 声母发音部位说明
+const initialDescMap: Record<string, string> = {
+  b: '双唇音', p: '双唇音', m: '双唇鼻音', f: '唇齿音',
+  d: '舌尖中音', t: '舌尖中音', n: '舌尖中鼻音', l: '舌尖中边音',
+  g: '舌根音', k: '舌根音', h: '舌根音',
+  j: '舌面音', q: '舌面音', x: '舌面音',
+  zh: '翘舌音', ch: '翘舌音', sh: '翘舌音', r: '翘舌音',
+  z: '平舌音', c: '平舌音', s: '平舌音',
+}
+
+// 判断韵母类型（单韵母/复韵母/鼻韵母）
+function finalKind(pinyin: string): string {
+  if (/(?:ng|n)$/.test(pinyin) || /iong|iang|uang|uan|ian|uan|uen|ün|uan/.test(pinyin)) return '鼻韵母'
+  if (pinyin.length > 1) return '复韵母'
+  return '单韵母'
+}
+
+// 从共享数据生成全量发音单元（声母 + 韵母）
+function buildPinyinUnits(): PronunciationUnit[] {
+  const list: PronunciationUnit[] = []
+  for (const [id, meta] of Object.entries(PINYIN_UNITS)) {
+    // 零声母音节（y/w 开头）归为韵母类
+    const initialMatch = id.match(/^(zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])/)
+    const initial = (initialMatch && initialMatch[1]) || ''
+    const isFinal = initial === 'y' || initial === 'w'
+    const desc = isFinal
+      ? `零声母+${finalKind(id.replace(/^[yw]/, ''))}`
+      : `${initialDescMap[initial] || '声母'}+${finalKind(id.replace(new RegExp(`^${initial}`), ''))}`
+    list.push({
+      id,
+      pinyin: id,
+      character: meta.char,
+      pinyinTone: meta.tone,
+      description: desc,
+      category: isFinal ? 'final' : 'initial',
+      color: isFinal ? '#67c23a' : '#409eff',
+      progress: 0,
+    })
+  }
+  return list
+}
+
+// 声调练习单元
+function buildToneUnits(): PronunciationUnit[] {
+  return Object.entries(TONE_UNITS).map(([id, meta]) => ({
+    id,
+    pinyin: id.replace(/_\w+$/, ''),
+    character: meta.char,
+    pinyinTone: meta.tone,
+    description: '声调练习',
+    category: 'tone' as const,
+    color: '#e6a23c',
+    progress: 0,
+  }))
+}
+
+// 合并：手工精选（含进度）+ 自动生成全量（去重，手工优先）
+const units: PronunciationUnit[] = [
+  ...featuredUnits,
+  ...buildPinyinUnits(),
+  ...buildToneUnits(),
+].filter((u, idx, arr) => arr.findIndex(x => x.id === u.id) === idx)
+
+// 分类标签计数
+const counts = computed(() => ({
+  all: units.length,
+  initial: units.filter(u => u.category === 'initial').length,
+  final: units.filter(u => u.category === 'final').length,
+  tone: units.filter(u => u.category === 'tone').length,
+}))
 
 const filteredUnits = computed(() => {
   if (!searchQuery.value) return units
@@ -75,10 +148,10 @@ const getProgressColor = (progress: number) => {
 
     <!-- 分类筛选 -->
     <div class="category-filter">
-      <el-tag :type="'primary'" effect="plain">全部 ({{ units.length }})</el-tag>
-      <el-tag effect="plain">声母 ({{ units.filter(u => u.category === 'initial').length }})</el-tag>
-      <el-tag effect="plain" type="success">韵母 ({{ units.filter(u => u.category === 'final').length }})</el-tag>
-      <el-tag effect="plain" type="warning">声调 ({{ units.filter(u => u.category === 'tone').length }})</el-tag>
+      <el-tag :type="'primary'" effect="plain">全部 ({{ counts.all }})</el-tag>
+      <el-tag effect="plain">声母 ({{ counts.initial }})</el-tag>
+      <el-tag effect="plain" type="success">韵母 ({{ counts.final }})</el-tag>
+      <el-tag effect="plain" type="warning">声调 ({{ counts.tone }})</el-tag>
     </div>
 
     <!-- 卡片网格 -->

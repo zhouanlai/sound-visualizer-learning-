@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, nextTick, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRecordingStore } from '@/stores/recording'
 import * as echarts from 'echarts'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
+import { getUnitMeta } from '@/data/pinyinUnits'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,99 +21,535 @@ const spectrogramRef = ref<HTMLCanvasElement | null>(null)
 const formantChartRef = ref<HTMLDivElement | null>(null)
 const energyChartRef = ref<HTMLDivElement | null>(null)
 
-// 3D口腔模型
+// =============================================
+// 发音特征解析：根据拼音推导口腔各部位姿态
+// =============================================
+interface ArticulationPose {
+  // 下颌开合度 0~1
+  jaw: number
+  // 舌位：舌尖/舌中/舌根的目标位置与缩放（x 前后、y 高低、z 左右）
+  tongueTip: { x: number; y: number; z: number; sy: number }
+  tongueMid: { x: number; y: number; z: number; sy: number }
+  tongueBack: { x: number; y: number; z: number; sy: number }
+  // 嘴唇：展唇(横向拉伸) 0~1、圆唇(向前收拢) 0~1
+  lipSpread: number
+  lipRound: number
+  // 软腭下降（鼻音时打开鼻腔通道）0~1
+  velum: number
+  // 气流强度
+  airflow: number
+}
+
+// 声母分类：舌位基准
+const TONGUE_LOW = { x: 0, y: -0.18, z: 0, sy: 0.8 }   // 舌平放
+
+// 声母 → 发音姿态
+function getInitialPose(initial: string): ArticulationPose {
+  switch (initial) {
+    // 双唇音 b p m：双唇闭合，舌平放
+    case 'b': case 'p': case 'm':
+      return {
+        jaw: 0.15, tongueTip: { ...TONGUE_LOW, x: 0.05 }, tongueMid: { ...TONGUE_LOW }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.1, lipRound: 0.3, velum: initial === 'm' ? 1 : 0, airflow: initial === 'p' ? 1 : 0.3,
+      }
+    // 唇齿音 f：下唇抵上齿，舌平放稍后
+    case 'f':
+      return {
+        jaw: 0.2, tongueTip: { ...TONGUE_LOW, x: -0.08 }, tongueMid: { ...TONGUE_LOW }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.3, lipRound: 0.1, velum: 0, airflow: 0.9,
+      }
+    // 舌尖中音 d t n l：舌尖抵上齿龈，舌中部下沉
+    case 'd': case 't': case 'n': case 'l':
+      return {
+        jaw: 0.3, tongueTip: { x: 0.08, y: 0, z: 0, sy: 1.5 }, tongueMid: { ...TONGUE_LOW }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.2, lipRound: 0.1, velum: initial === 'n' ? 1 : 0, airflow: initial === 't' ? 1 : 0.3,
+      }
+    // 舌根音 g k h：舌根抬起抵软腭
+    case 'g': case 'k': case 'h':
+      return {
+        jaw: 0.35, tongueTip: { ...TONGUE_LOW }, tongueMid: { ...TONGUE_LOW }, tongueBack: { x: -0.1, y: 0.08, z: 0, sy: 1.6 },
+        lipSpread: 0.2, lipRound: 0.1, velum: 0, airflow: initial === 'k' ? 1 : (initial === 'h' ? 0.9 : 0.3),
+      }
+    // 舌面音 j q x：舌面前部抵硬腭，舌面抬高
+    case 'j': case 'q': case 'x':
+      return {
+        jaw: 0.2, tongueTip: { x: 0.1, y: 0.05, z: 0, sy: 1.7 }, tongueMid: { x: 0.05, y: 0.05, z: 0, sy: 1.5 }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.6, lipRound: 0, velum: 0, airflow: initial === 'q' ? 1 : (initial === 'x' ? 0.9 : 0.3),
+      }
+    // 翘舌音 zh ch sh r：舌尖卷起抵硬腭前部
+    case 'zh': case 'ch': case 'sh': case 'r':
+      return {
+        jaw: 0.25, tongueTip: { x: 0.02, y: 0.1, z: 0, sy: 1.8 }, tongueMid: { x: 0, y: 0.02, z: 0, sy: 1.3 }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.3, lipRound: 0.15, velum: 0, airflow: initial === 'ch' ? 1 : (initial === 'sh' ? 0.9 : 0.3),
+      }
+    // 平舌音 z c s：舌尖抵下齿背，舌平
+    case 'z': case 'c': case 's':
+      return {
+        jaw: 0.2, tongueTip: { x: 0.1, y: -0.15, z: 0, sy: 1.0 }, tongueMid: { ...TONGUE_LOW }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.3, lipRound: 0.1, velum: 0, airflow: initial === 'c' ? 1 : (initial === 's' ? 0.9 : 0.3),
+      }
+    default:
+      return {
+        jaw: 0.3, tongueTip: { ...TONGUE_LOW }, tongueMid: { ...TONGUE_LOW }, tongueBack: { ...TONGUE_LOW },
+        lipSpread: 0.3, lipRound: 0.1, velum: 0, airflow: 0.3,
+      }
+  }
+}
+
+// 韵母 → 口型姿态
+function getFinalPose(finals: string): ArticulationPose {
+  const has = (re: RegExp) => re.test(finals)
+  const isNasal = has(/n$/) || has(/ng$/)
+  let pose: ArticulationPose
+  if (has(/a/)) {
+    // a 开口大、舌低
+    pose = {
+      jaw: 0.9, tongueTip: { x: 0, y: -0.25, z: 0, sy: 0.8 }, tongueMid: { x: 0, y: -0.2, z: 0, sy: 0.8 }, tongueBack: { x: 0, y: -0.15, z: 0, sy: 0.8 },
+      lipSpread: 0.4, lipRound: 0.1, velum: isNasal ? 0.8 : 0, airflow: 0.4,
+    }
+  } else if (has(/o/)) {
+    // o 圆唇、舌后缩
+    pose = {
+      jaw: 0.7, tongueTip: { x: -0.05, y: -0.15, z: 0, sy: 0.9 }, tongueMid: { x: -0.08, y: -0.1, z: 0, sy: 1.0 }, tongueBack: { x: -0.15, y: -0.05, z: 0, sy: 1.2 },
+      lipSpread: 0.1, lipRound: 0.9, velum: isNasal ? 0.8 : 0, airflow: 0.4,
+    }
+  } else if (has(/i/)) {
+    // i 展唇、舌位高前
+    pose = {
+      jaw: 0.35, tongueTip: { x: 0.15, y: 0.02, z: 0, sy: 1.4 }, tongueMid: { x: 0.1, y: 0.02, z: 0, sy: 1.3 }, tongueBack: { ...TONGUE_LOW },
+      lipSpread: 1, lipRound: 0, velum: isNasal ? 0.8 : 0, airflow: 0.35,
+    }
+  } else if (has(/u/)) {
+    // u 圆唇、舌位高后
+    pose = {
+      jaw: 0.35, tongueTip: { x: -0.05, y: -0.1, z: 0, sy: 1.0 }, tongueMid: { x: -0.1, y: -0.05, z: 0, sy: 1.1 }, tongueBack: { x: -0.15, y: 0, z: 0, sy: 1.3 },
+      lipSpread: 0.05, lipRound: 1, velum: isNasal ? 0.8 : 0, airflow: 0.3,
+    }
+  } else if (has(/ü|v/)) {
+    // ü 撮口、舌位高前
+    pose = {
+      jaw: 0.3, tongueTip: { x: 0.15, y: 0.05, z: 0, sy: 1.5 }, tongueMid: { x: 0.1, y: 0.05, z: 0, sy: 1.4 }, tongueBack: { ...TONGUE_LOW },
+      lipSpread: 0.15, lipRound: 0.85, velum: isNasal ? 0.8 : 0, airflow: 0.3,
+    }
+  } else {
+    // e 半开口、舌中
+    pose = {
+      jaw: 0.6, tongueTip: { x: 0, y: -0.12, z: 0, sy: 1.0 }, tongueMid: { x: 0, y: -0.1, z: 0, sy: 1.0 }, tongueBack: { x: 0, y: -0.05, z: 0, sy: 1.0 },
+      lipSpread: 0.3, lipRound: 0.2, velum: isNasal ? 0.8 : 0, airflow: 0.35,
+    }
+  }
+  return pose
+}
+
+// 从拼音解析声母/韵母
+function splitPinyin(pinyin: string): { initial: string; finals: string } {
+  const initials = ['zh', 'ch', 'sh', 'b', 'p', 'm', 'f', 'd', 't', 'n', 'l', 'g', 'k', 'h', 'j', 'q', 'x', 'r', 'z', 'c', 's', 'y', 'w']
+  for (const ini of initials) {
+    if (pinyin.startsWith(ini)) {
+      return { initial: ini, finals: pinyin.slice(ini.length) }
+    }
+  }
+  return { initial: '', finals: pinyin }
+}
+
+// 综合声母与韵母，得到最终发音姿态
+function getArticulationPose(unitId: string): ArticulationPose {
+  // 声调练习单元如 ma_t2 → 去后缀取 ma
+  const baseId = unitId.replace(/_[a-z0-9]+$/i, '')
+  const { initial, finals } = splitPinyin(baseId)
+  const initialPose = initial ? getInitialPose(initial) : null
+  const finalPose = getFinalPose(finals)
+
+  // 无声母（零声母音节如 a/o/er）直接用韵母姿态
+  if (!initialPose) return finalPose
+
+  // 组合：下颌取韵母（元音主导口型），舌位声母为准（辅音成阻），唇形按元音
+  return {
+    jaw: Math.max(initialPose.jaw, finalPose.jaw * 0.7),
+    tongueTip: initialPose.tongueTip,
+    tongueMid: initialPose.tongueMid,
+    tongueBack: initialPose.tongueBack,
+    lipSpread: finalPose.lipSpread,
+    lipRound: finalPose.lipRound,
+    velum: Math.max(initialPose.velum, finalPose.velum),
+    airflow: initialPose.airflow,
+  }
+}
+
+// 当前单元的发音姿态（供动画使用）
+const currentPose = computed(() => getArticulationPose(unitId.value))
+
+// =============================================
+// 精细 3D 口腔模型：上颚/软腭/上下颌/舌头/牙齿/嘴唇/声带/气流
+// =============================================
 function initThreeScene() {
   if (!threeContainerRef.value) return
   const container = threeContainerRef.value
   const scene = new THREE.Scene()
-  scene.background = new THREE.Color(0x1a1a2e)
-  const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 1000)
-  camera.position.set(0, 0, 3)
+  scene.background = new THREE.Color(0xf7f4ef)
+  // 浅色暖调背景，贴近教材纸张质感
+  scene.fog = new THREE.Fog(0xf7f4ef, 8, 16)
+
+  const camera = new THREE.PerspectiveCamera(42, container.clientWidth / container.clientHeight, 0.1, 100)
+  // 默认侧面（矢状面）视角：第一眼就是教科书口腔剖面图
+  camera.position.set(3.1, 0.05, 0.02)
+  camera.lookAt(0, -0.1, 0)
   const renderer = new THREE.WebGLRenderer({ antialias: true })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(container.clientWidth, container.clientHeight)
+  renderer.shadowMap.enabled = true
   container.appendChild(renderer.domElement)
 
-  // 灯光
-  const ambientLight = new THREE.AmbientLight(0x404040, 2)
-  scene.add(ambientLight)
-  const dirLight = new THREE.DirectionalLight(0xffffff, 1)
-  dirLight.position.set(5, 5, 5)
-  scene.add(dirLight)
+  // CSS2D 渲染器（汉字/发音信息标注，不随透视变形）
+  const labelRenderer = new CSS2DRenderer()
+  labelRenderer.setSize(container.clientWidth, container.clientHeight)
+  labelRenderer.domElement.style.position = 'absolute'
+  labelRenderer.domElement.style.top = '0'
+  labelRenderer.domElement.style.left = '0'
+  labelRenderer.domElement.style.pointerEvents = 'none'
+  container.appendChild(labelRenderer.domElement)
 
-  // 口腔模型（简化版）
-  // 上颚
-  const palateGeom = new THREE.SphereGeometry(1, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2)
-  const palateMat = new THREE.MeshPhongMaterial({ color: 0xff9999, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
-  const palate = new THREE.Mesh(palateGeom, palateMat)
-  palate.position.y = 0.3
-  scene.add(palate)
+  // 当前汉字 + 发音部位标注
+  const meta = getUnitMeta(unitId.value)
+  const labelDiv = document.createElement('div')
+  labelDiv.style.cssText = 'text-align:center;color:#6b3a52;font-family:sans-serif;user-select:none;'
+  const charSpan = document.createElement('div')
+  charSpan.textContent = meta?.char || unitId.value
+  charSpan.style.cssText = 'font-size:34px;font-weight:700;text-shadow:0 1px 4px rgba(255,255,255,0.8);'
+  const pinyinSpan = document.createElement('div')
+  pinyinSpan.textContent = meta?.tone || ''
+  pinyinSpan.style.cssText = 'font-size:14px;color:#4a7a9a;margin-top:2px;'
+  labelDiv.appendChild(charSpan)
+  labelDiv.appendChild(pinyinSpan)
+  const label = new CSS2DObject(labelDiv)
+  label.position.set(0, 1.55, 0)
+  scene.add(label)
 
-  // 舌头
-  const tongueGeom = new THREE.SphereGeometry(0.7, 32, 16, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2)
-  const tongueMat = new THREE.MeshPhongMaterial({ color: 0xcc3333, transparent: true, opacity: 0.8 })
-  const tongue = new THREE.Mesh(tongueGeom, tongueMat)
-  tongue.position.y = -0.2
-  tongue.scale.set(1, 0.5, 1)
-  scene.add(tongue)
-
-  // 牙齿（上）
-  const teethGeom = new THREE.TorusGeometry(0.9, 0.05, 8, 32, Math.PI)
-  const teethMat = new THREE.MeshPhongMaterial({ color: 0xffffff })
-  const teeth = new THREE.Mesh(teethGeom, teethMat)
-  teeth.position.y = 0.1
-  teeth.rotation.x = Math.PI / 2
-  scene.add(teeth)
-
-  // 气流粒子
-  const particlesGeom = new THREE.BufferGeometry()
-  const particleCount = 200
-  const positions = new Float32Array(particleCount * 3)
-  for (let i = 0; i < particleCount; i++) {
-    positions[i * 3] = (Math.random() - 0.5) * 0.3
-    positions[i * 3 + 1] = Math.random() * 2 - 0.5
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 0.3
+  // 部位中文标注（悬停查看详细说明，帮助学习者看懂口腔结构）
+  // 相机在 x 轴正方向看向原点，屏幕投影中 y 控制上下、z 控制左右、x 控制远近缩放
+  // 坐标已按截图中模型的视觉方向重新对齐，使标签贴合对应结构外缘
+  const partLabelItems = [
+    { name: '鼻腔', desc: '鼻音（m、n、ng）的气流从这里流出', x: 0.15, y: 0.75, z: 0.0 },
+    { name: '上颚', desc: '硬腭。舌面音（j、q、x）舌尖抵住硬腭前部', x: 0.15, y: 0.32, z: 0.15 },
+    { name: '软腭', desc: '发鼻音时下垂，让气流转向鼻腔', x: 0.15, y: 0.42, z: -0.28 },
+    { name: '悬雍垂', desc: '小舌，和软腭一起控制鼻音', x: 0.15, y: 0.18, z: -0.38 },
+    { name: '上牙', desc: '唇齿音（f）下唇抵住上齿', x: 0.15, y: 0.08, z: 0.42 },
+    { name: '下牙', desc: '平舌音（z、c、s）舌尖抵住下齿背', x: 0.15, y: -0.28, z: 0.35 },
+    { name: '上唇', desc: '双唇音（b、p、m）上下唇闭合', x: 0.15, y: 0.2, z: 0.78 },
+    { name: '下唇', desc: '唇齿音（f）下唇靠近上齿', x: 0.15, y: -0.35, z: 0.78 },
+    { name: '舌头', desc: '舌尖、舌中、舌根控制大多数声母的发音部位', x: 0.15, y: -0.12, z: 0.08 },
+    { name: '喉', desc: '气流从肺部经喉部进入口腔', x: 0.15, y: -0.28, z: -0.82 },
+  ] as const
+  for (const p of partLabelItems) {
+    const pDiv = document.createElement('div')
+    pDiv.textContent = p.name
+    pDiv.title = p.desc
+    // 始终浮于前景：半透明底 + 细描边，文字本身半透明，不遮挡 3D 模型
+    pDiv.style.cssText = 'pointer-events:auto;cursor:help;z-index:10;background:rgba(255,255,255,0.45);border:1px solid rgba(255,255,255,0.7);border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600;color:rgba(58,46,42,0.82);font-family:sans-serif;user-select:none;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,0.15);'
+    const obj = new CSS2DObject(pDiv)
+    obj.position.set(p.x, p.y, p.z)
+    // 置于较高渲染顺序，确保标签叠在模型前景
+    obj.renderOrder = 999
+    scene.add(obj)
   }
+
+  // ---- 灯光：柔和暖光，突出口腔内部结构 ----
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65))
+  const hemi = new THREE.HemisphereLight(0xfff5ee, 0xc8b8a8, 0.6)
+  scene.add(hemi)
+  const dirMain = new THREE.DirectionalLight(0xfff0e0, 1.0)
+  dirMain.position.set(2, 3, 4)
+  scene.add(dirMain)
+  const dirFill = new THREE.DirectionalLight(0xe8f0ff, 0.5)
+  dirFill.position.set(-3, 1, 2)
+  scene.add(dirFill)
+
+  // ---- 辅助坐标网格（轻微）----
+  // const grid = new THREE.GridHelper(4, 20, 0x334466, 0x223344)
+  // grid.position.y = -1.2
+  // scene.add(grid)
+
+  // ---- 部件容器 ----
+  // 上颌组（固定）
+  const upperJaw = new THREE.Group()
+  scene.add(upperJaw)
+  // 下颌组（随开合旋转）
+  const lowerJaw = new THREE.Group()
+  lowerJaw.position.set(0, -0.55, 0.1)
+  scene.add(lowerJaw)
+
+  // ==================== 头部半透明轮廓（侧面剖面感） ====================
+  const headMat = new THREE.MeshPhongMaterial({
+    color: 0xc8b4a0, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false,
+  })
+  const head = new THREE.Mesh(new THREE.SphereGeometry(1.35, 48, 32), headMat)
+  head.scale.set(1, 0.9, 1.1)
+  head.position.y = -0.05
+  scene.add(head)
+  // 剖面参考线（中线轮廓）
+  const cutLineMat = new THREE.LineBasicMaterial({ color: 0xb8a898, transparent: true, opacity: 0.35 })
+  const cutPts: THREE.Vector3[] = []
+  for (let i = 0; i <= 40; i++) {
+    const a = (i / 40) * Math.PI
+    cutPts.push(new THREE.Vector3(Math.cos(a) * 1.3, Math.sin(a) * 1.15, 0))
+  }
+  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(cutPts), cutLineMat))
+
+  // ==================== 上颚（硬腭）：拱形穹顶 ====================
+  const palateMat = new THREE.MeshPhongMaterial({
+    color: 0xe0859a, transparent: true, opacity: 0.6, side: THREE.DoubleSide, depthWrite: false, shininess: 20,
+  })
+  const palate = new THREE.Mesh(new THREE.SphereGeometry(0.95, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.55), palateMat)
+  palate.position.set(0, 0.42, -0.05)
+  palate.scale.set(1, 0.62, 1)
+  upperJaw.add(palate)
+  // 硬腭纹路
+  const ridgeMat = new THREE.LineBasicMaterial({ color: 0xc86078, transparent: true, opacity: 0.45 })
+  const ridgePts: THREE.Vector3[] = []
+  for (let i = 0; i <= 30; i++) {
+    const a = (i / 30) * Math.PI * 0.9 - Math.PI * 0.45
+    ridgePts.push(new THREE.Vector3(Math.sin(a) * 0.9, 0.42, Math.cos(a) * 0.9 * 0.35))
+  }
+  const ridgeLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(ridgePts), ridgeMat)
+  upperJaw.add(ridgeLine)
+
+  // ==================== 软腭（可下垂，鼻音打开通道） ====================
+  const velumMat = new THREE.MeshPhongMaterial({
+    color: 0xd86078, transparent: true, opacity: 0.75, side: THREE.DoubleSide,
+  })
+  const velum = new THREE.Mesh(new THREE.SphereGeometry(0.4, 32, 16, 0, Math.PI * 2, Math.PI * 0.45, Math.PI * 0.55), velumMat)
+  velum.position.set(0, 0.35, -0.75)
+  velum.scale.set(0.7, 1, 0.55)
+  upperJaw.add(velum)
+  // 悬雍垂（小舌）
+  const uvulaMat = new THREE.MeshPhongMaterial({ color: 0xc85068 })
+  const uvula = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.2, 12), uvulaMat)
+  uvula.position.set(0, 0.28, -0.78)
+  upperJaw.add(uvula)
+
+  // ==================== 鼻腔（鼻音通道，鼻音时气流由此流出） ====================
+  const nosePath = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0, 0.78, 0.5),
+    new THREE.Vector3(0, 0.9, 0),
+    new THREE.Vector3(0, 0.85, -0.55),
+  ])
+  const noseGeom = new THREE.TubeGeometry(nosePath, 24, 0.1, 12, false)
+  const noseMat = new THREE.MeshPhongMaterial({
+    color: 0x7f9cc0, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+  })
+  const nose = new THREE.Mesh(noseGeom, noseMat)
+  upperJaw.add(nose)
+
+  // ==================== 上牙齿：门牙 + 两侧臼齿 ====================
+  const teethMat = new THREE.MeshPhongMaterial({ color: 0xece0cc, shininess: 60 })
+  const upperTeeth = new THREE.Group()
+  upperJaw.add(upperTeeth)
+  for (let i = -2; i <= 2; i++) {
+    const incisor = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.06), teethMat)
+    incisor.position.set(i * 0.09, 0.16, 0.45 + Math.abs(i) * 0.015)
+    incisor.rotation.z = i * 0.08
+    upperTeeth.add(incisor)
+  }
+  // 上臼齿
+  for (let i = 1; i <= 3; i++) {
+    for (const side of [-1, 1]) {
+      const molar = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.08), teethMat)
+      molar.position.set(side * (0.3 + i * 0.12), 0.14, 0.3 - i * 0.04)
+      molar.rotation.z = side * 0.3
+      molar.rotation.y = side * 0.2
+      upperTeeth.add(molar)
+    }
+  }
+
+  // ==================== 下颌骨 + 下牙齿 ====================
+  const mandibleMat = new THREE.MeshPhongMaterial({
+    color: 0x8f4052, transparent: true, opacity: 0.45, side: THREE.DoubleSide,
+  })
+  const mandible = new THREE.Mesh(new THREE.SphereGeometry(0.85, 40, 20, 0, Math.PI * 2, Math.PI * 0.45, Math.PI * 0.55), mandibleMat)
+  mandible.position.y = 0.12
+  mandible.scale.set(1, 0.6, 1)
+  lowerJaw.add(mandible)
+
+  const lowerTeeth = new THREE.Group()
+  lowerJaw.add(lowerTeeth)
+  for (let i = -2; i <= 2; i++) {
+    const incisor = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.15, 0.06), teethMat)
+    incisor.position.set(i * 0.09, 0.1, 0.42 + Math.abs(i) * 0.015)
+    incisor.rotation.z = i * 0.08
+    lowerTeeth.add(incisor)
+  }
+  for (let i = 1; i <= 3; i++) {
+    for (const side of [-1, 1]) {
+      const molar = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.11, 0.08), teethMat)
+      molar.position.set(side * (0.3 + i * 0.12), 0.08, 0.26 - i * 0.04)
+      molar.rotation.z = side * 0.3
+      molar.rotation.y = side * 0.2
+      lowerTeeth.add(molar)
+    }
+  }
+
+  // ==================== 舌头：三段球体拼成扁长舌形（舌尖/舌中/舌根独立驱动） ====================
+  const tongueMat = new THREE.MeshPhongMaterial({
+    color: 0xd45068, transparent: true, opacity: 0.95, shininess: 30,
+  })
+  // 舌尖（圆润、可翘起，对应 d/t/n/l、zh/ch/sh、j/q/x 等舌位）
+  const tongueTipMesh = new THREE.Mesh(new THREE.SphereGeometry(0.2, 24, 16), tongueMat)
+  tongueTipMesh.scale.set(1, 0.55, 0.9)
+  tongueTipMesh.position.set(0.42, -0.38, 0.55)
+  lowerJaw.add(tongueTipMesh)
+  // 舌中
+  const tongueMidMesh = new THREE.Mesh(new THREE.SphereGeometry(0.27, 24, 16), tongueMat)
+  tongueMidMesh.scale.set(1, 0.55, 0.9)
+  tongueMidMesh.position.set(0, -0.4, -0.02)
+  lowerJaw.add(tongueMidMesh)
+  // 舌根（贴近咽喉，对应 g/k/h 舌根音）
+  const tongueBackMesh = new THREE.Mesh(new THREE.SphereGeometry(0.24, 24, 16), tongueMat)
+  tongueBackMesh.scale.set(1, 0.55, 0.9)
+  tongueBackMesh.position.set(-0.42, -0.36, -0.55)
+  lowerJaw.add(tongueBackMesh)
+
+  // ==================== 嘴唇（上下唇，随开合与圆展变化） ====================
+  const lipMat = new THREE.MeshPhongMaterial({ color: 0xc84860, shininess: 40 })
+  const upperLip = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.09, 16, 40, Math.PI * 0.7), lipMat)
+  upperLip.position.set(0, 0.12, 0.72)
+  upperLip.rotation.set(Math.PI / 2, 0, Math.PI / 2)
+  upperLip.scale.z = 0.85
+  upperJaw.add(upperLip)
+  const lowerLip = new THREE.Mesh(new THREE.TorusGeometry(0.55, 0.09, 16, 40, Math.PI * 0.7), lipMat)
+  lowerLip.position.set(0, -0.12, 0.72)
+  lowerLip.rotation.set(Math.PI / 2, 0, Math.PI / 2)
+  lowerLip.scale.z = 0.85
+  lowerJaw.add(lowerLip)
+
+  // ==================== 气流粒子（从喉部向口外喷出，鼻音时部分走鼻腔） ====================
+  const particleCount = 300
+  const positions = new Float32Array(particleCount * 3)
+  const velocities = new Float32Array(particleCount * 3)
+  for (let i = 0; i < particleCount; i++) {
+    resetParticle(i)
+  }
+  function resetParticle(i: number) {
+    positions[i * 3] = (Math.random() - 0.5) * 0.4
+    positions[i * 3 + 1] = -0.55 + (Math.random() - 0.5) * 0.2
+    positions[i * 3 + 2] = -0.8 - Math.random() * 0.4
+    velocities[i * 3] = (Math.random() - 0.5) * 0.3
+    velocities[i * 3 + 1] = (Math.random() - 0.5) * 0.2
+    velocities[i * 3 + 2] = 0.4 + Math.random() * 0.5
+  }
+  const particlesGeom = new THREE.BufferGeometry()
   particlesGeom.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  const particlesMat = new THREE.PointsMaterial({ color: 0x409eff, size: 0.03, transparent: true, opacity: 0.7 })
+  const particlesMat = new THREE.PointsMaterial({
+    color: 0x3f7fc0, size: 0.05, transparent: true, opacity: 0.85, depthWrite: false,
+  })
   const particles = new THREE.Points(particlesGeom, particlesMat)
   scene.add(particles)
 
-  // 控制器
+  // ==================== 控制器 ====================
   const controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
+  controls.dampingFactor = 0.08
+  controls.minDistance = 1.5
+  controls.maxDistance = 8
+  controls.target.set(0, -0.15, 0)
 
-  // 动画
+  // ==================== 动画循环 ====================
   let time = 0
+  let rafId = 0
+  // 当前姿态（线性插值逼近目标）
+  const current = {
+    jaw: 0.3, lipSpread: 0.3, lipRound: 0.1, velum: 0,
+    tipX: 0, tipY: 0, midY: 0, backY: 0, backX: 0,
+    airflow: 0.4,
+  }
+
   function animate() {
-    requestAnimationFrame(animate)
-    time += 0.02
+    rafId = requestAnimationFrame(animate)
+    time += 0.016
+    const pose = currentPose.value
 
-    // 舌头动画
-    tongue.position.y = -0.2 + Math.sin(time * 2) * 0.05
-    tongue.rotation.z = Math.sin(time) * 0.1
+    // ---- 平滑逼近目标姿态 ----
+    const k = 0.06
+    current.jaw += (pose.jaw - current.jaw) * k
+    current.lipSpread += (pose.lipSpread - current.lipSpread) * k
+    current.lipRound += (pose.lipRound - current.lipRound) * k
+    current.velum += (pose.velum - current.velum) * k
+    current.tipX += (pose.tongueTip.x - current.tipX) * k
+    current.tipY += (pose.tongueTip.y - current.tipY) * k
+    current.midY += (pose.tongueMid.y - current.midY) * k
+    current.backY += (pose.tongueBack.y - current.backY) * k
+    current.backX += (pose.tongueBack.x - current.backX) * k
+    current.airflow += (pose.airflow - current.airflow) * k
 
-    // 气流动画
-    const positionAttr = particles.geometry.attributes.position
-    if (positionAttr) {
-      const pos = positionAttr.array as Float32Array
-      for (let i = 0; i < particleCount; i++) {
-        const idx = i * 3 + 1
-        if (pos[idx] !== undefined) {
-          pos[idx] += 0.02
-          if (pos[idx] > 1.5) {
-            pos[idx] = -0.5
-            pos[i * 3] = (Math.random() - 0.5) * 0.3
-            pos[i * 3 + 2] = (Math.random() - 0.5) * 0.3
-          }
-        }
+    // ---- 下颌开合（绕后方关节旋转） ----
+    lowerJaw.rotation.x = -current.jaw * 0.5
+
+    // ---- 舌头：三段球体独立驱动，模拟舌形弯曲 ----
+    tongueTipMesh.position.set(current.tipX + 0.42, current.tipY - 0.38, 0.55)
+    tongueMidMesh.position.set(0, current.midY - 0.4, -0.02)
+    tongueBackMesh.position.set(current.backX - 0.42, current.backY - 0.36, -0.55)
+    // 舌尖抬起时舌体微微上翘、收窄（翘舌/舌面音）
+    const lift = (current.tipY + 0.18) / 0.3
+    tongueTipMesh.scale.set(1, 0.55 - lift * 0.1, 0.9)
+    tongueMidMesh.scale.set(1, 0.55 - lift * 0.08, 0.9)
+
+    // ---- 嘴唇：开合 + 圆展 ----
+    const lipOpen = current.jaw * 0.22
+    upperLip.position.y = 0.12 + lipOpen * 0.15
+    lowerLip.position.y = -0.12 - lipOpen * 0.35
+    // 圆唇：横向收拢、向前凸；展唇：横向拉伸
+    const roundScale = 1 - current.lipRound * 0.5
+    upperLip.scale.set(roundScale * (1 + current.lipSpread * 0.3), roundScale * 0.9, 0.85 + current.lipRound * 0.5)
+    lowerLip.scale.set(roundScale * (1 + current.lipSpread * 0.3), roundScale * 0.9, 0.85 + current.lipRound * 0.5)
+    // 圆唇时嘴唇前移
+    upperLip.position.z = 0.72 + current.lipRound * 0.25
+    lowerLip.position.z = 0.72 + current.lipRound * 0.25
+
+    // ---- 软腭：鼻音时下垂，打开鼻腔通道 ----
+    velum.rotation.x = current.velum * 0.9
+    velum.position.y = 0.35 - current.velum * 0.25
+    uvula.rotation.x = current.velum * 0.9
+    uvula.position.y = 0.28 - current.velum * 0.3
+
+    // ---- 气流粒子：从喉部喷向口外；鼻音时部分从鼻腔通道飘出 ----
+    const speedFactor = 0.6 + current.airflow * 1.6
+    const posAttr = particlesGeom.attributes.position as THREE.BufferAttribute | undefined
+    if (!posAttr) return
+    const pos = posAttr.array as Float32Array
+    const nasalOn = current.velum > 0.5
+    for (let i = 0; i < particleCount; i++) {
+      const useNasal = nasalOn && i % 3 === 0
+      const idx = i * 3
+      pos[idx] = (pos[idx] ?? 0) + (velocities[idx] ?? 0) * speedFactor
+      pos[idx + 1] = (pos[idx + 1] ?? 0) + ((velocities[idx + 1] ?? 0) + (useNasal ? 0.55 : 0)) * speedFactor
+      pos[idx + 2] = (pos[idx + 2] ?? 0) + (velocities[idx + 2] ?? 0) * speedFactor
+      if (useNasal) {
+        // 走鼻腔的粒子升到鼻腔高度后重新生成
+        if ((pos[idx + 1] ?? 0) > 0.85) resetParticle(i)
+      } else if ((pos[idx + 2] ?? 0) > 1.35) {
+        resetParticle(i)
       }
-      positionAttr.needsUpdate = true
     }
+    posAttr.needsUpdate = true
+    particlesMat.opacity = 0.35 + current.airflow * 0.45
 
     controls.update()
     renderer.render(scene, camera)
+    labelRenderer.render(scene, camera)
   }
   animate()
+
+  // 返回清理函数（组件卸载时释放资源）
+  return () => {
+    cancelAnimationFrame(rafId)
+    renderer.dispose()
+    controls.dispose()
+    if (renderer.domElement.parentNode === container) {
+      container.removeChild(renderer.domElement)
+    }
+    if (labelRenderer.domElement.parentNode === container) {
+      container.removeChild(labelRenderer.domElement)
+    }
+  }
 }
 
 // 声调曲线对比图（标准曲线由后端生成）
@@ -316,13 +754,21 @@ function renderDataCharts() {
   initEnergyChart()
 }
 
+// 3D 场景清理函数（卸载时调用）
+let disposeThree: (() => void) | null = null
+
 onMounted(async () => {
   // 等待DOM渲染完成后再初始化图表
   await nextTick()
   setTimeout(() => {
     renderDataCharts()
-    initThreeScene()
+    disposeThree = initThreeScene() ?? null
   }, 100)
+})
+
+onUnmounted(() => {
+  disposeThree?.()
+  disposeThree = null
 })
 
 // 当后端分析结果到达（可能晚于组件挂载）时重绘数据图表，避免空白
@@ -388,7 +834,7 @@ watch(
         <div ref="toneChartRef" class="chart-container"></div>
       </div>
       <div class="three-card">
-        <h4>3D发音动画 <small>（拖拽旋转，滚轮缩放）</small></h4>
+        <h4>3D发音动画 <small>（剖面示意 · 拖拽旋转 · 滚轮缩放 · 悬停部位查看说明）</small></h4>
         <div ref="threeContainerRef" class="three-container"></div>
       </div>
     </div>
@@ -450,9 +896,10 @@ watch(
 .chart-card h4 { margin: 0 0 8px; font-size: 14px; color: #303133; }
 .chart-card, .three-card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .chart-container { width: 100%; height: 300px; }
+.three-card { position: relative; }
 .three-card h4 { margin: 0 0 8px; font-size: 14px; color: #303133; }
 .three-card h4 small { font-size: 11px; color: #909399; font-weight: normal; }
-.three-container { width: 100%; height: 300px; border-radius: 8px; overflow: hidden; }
+.three-container { position: relative; width: 100%; height: 300px; border-radius: 8px; overflow: hidden; }
 .phoneme-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .phoneme-section h3 { margin: 0 0 16px; font-size: 16px; color: #303133; }
 .phoneme-section h3 small { font-size: 12px; color: #909399; font-weight: normal; }
