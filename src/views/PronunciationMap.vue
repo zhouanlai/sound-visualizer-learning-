@@ -80,6 +80,7 @@ const filteredFinals = computed(() => {
     <div class="legend">
       <span class="legend-item"><span class="dot available"></span> 可学习</span>
       <span class="legend-item"><span class="dot locked"></span> 未开放</span>
+      <span class="legend-item legend-note">* AI 录音检测当前已开放 50 个核心单元（详见发音库「核心对比」卡片）</span>
     </div>
 
     <!-- 声调说明 -->
@@ -177,6 +178,11 @@ const filteredFinals = computed(() => {
 
 .dot.locked {
   background: #dcdfe6;
+}
+
+.legend-note {
+  color: #909399;
+  font-size: 12px;
 }
 
 .tone-legend {

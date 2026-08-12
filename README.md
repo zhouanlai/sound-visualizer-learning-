@@ -41,14 +41,19 @@ pip install -r requirements.txt
 
 ### 4. 启动后端服务器
 ```bash
-python main.py
+env -u PYTHONPATH python3 main.py
 ```
+> - macOS/Linux 使用 `python3`；若使用 `python main.py` 提示命令不存在，请改用 `python3`。
+> - **必须使用 `env -u PYTHONPATH` 启动**：在 CodeBuddy 等 IDE 的集成终端中，
+>   PYTHONPATH 会被注入 IDE 的 Python shim，拦截 librosa 写缓存时的 unlink 操作，
+>   导致 `/api/audio/analyze` 返回 500。`./start-dev.sh` 已自动处理该问题。
 后端将在 http://localhost:8000 启动
 
-### 5. 同时启动前后端
+### 5. 一键启动前后端
 ```bash
-npm run dev:all
+./start-dev.sh
 ```
+脚本会先后台启动后端（端口 8000）与前端（端口 5173），并在退出时自动清理。
 
 ## 功能模块
 

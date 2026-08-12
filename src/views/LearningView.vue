@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useRecordingStore } from '@/stores/recording'
 import { useUserStore } from '@/stores/user'
-import { getUnitMeta } from '@/data/pinyinUnits'
+import { getUnitMeta, isVerifiedUnit, getVerifiedUnitMeta, VERIFIED_UNIT_IDS } from '@/data/pinyinUnits'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,18 +27,34 @@ const unitData: Record<string, any> = {
 }
 
 const unitId = computed(() => route.params.id as string)
+// 是否已通过验证、开放 AI 检测的核心单元（与后端 GROW-08 分级开放策略一致）
+const isVerified = computed(() => isVerifiedUnit(unitId.value))
+const verifiedMeta = computed(() => getVerifiedUnitMeta(unitId.value))
 // 优先取手工教学数据；未收录的拼音单元（发音库/地图全量单元）自动从共享数据兜底
 const unit = computed(() => {
   const known = unitData[unitId.value]
-  if (known) return known
+  if (known) {
+    // 核心对比单元使用验证清单中的展示拼音（如 u_u → u/ü，ma_tone → mā/má/mǎ/mà）
+    return { ...known, pinyin: verifiedMeta.value?.pinyin ?? known.pinyin }
+  }
   const meta = getUnitMeta(unitId.value)
   if (meta) {
     return {
-      pinyin: meta.tone,
+      pinyin: verifiedMeta.value?.pinyin ?? meta.tone,
       character: meta.char,
       tone: 1,
       desc: `${unitId.value} 发音练习`,
       detail: '点击「播放示范」听标准发音，然后按下录音按钮练习。对照反馈页的评分与可视化结果不断改进。',
+    }
+  }
+  // 核心对比单元（如 b_p、d_t）不在拼音全量表中，从验证清单兜底
+  if (verifiedMeta.value) {
+    return {
+      pinyin: verifiedMeta.value.pinyin,
+      character: verifiedMeta.value.char,
+      tone: 1,
+      desc: `${verifiedMeta.value.desc}（核心对比单元）`,
+      detail: '对比单元需分别朗读多个目标音节，注意区分发音部位与送气/不送气、鼻音/边音等特征。',
     }
   }
   return unitData.ma
@@ -147,7 +163,11 @@ onUnmounted(() => { stopVisualization() })
     <div class="teaching-section">
       <div class="unit-info">
         <div class="unit-character">{{ unit.character }}</div>
-        <div class="unit-pinyin">{{ unit.pinyin }}</div>
+        <div class="unit-pinyin">
+          {{ unit.pinyin }}
+          <el-tag v-if="isVerified" type="success" size="small" effect="light" class="verify-tag">可检测</el-tag>
+          <el-tag v-else type="info" size="small" effect="light" class="verify-tag">仅学习</el-tag>
+        </div>
         <div class="unit-desc">{{ unit.desc }}</div>
         <p class="unit-detail">{{ unit.detail }}</p>
       </div>
@@ -162,34 +182,46 @@ onUnmounted(() => { stopVisualization() })
     <!-- 中部：录音练习区 -->
     <div class="recording-section">
       <h3>录音练习</h3>
-      <div class="recording-controls">
-        <el-button
-          v-if="!recordingStore.isRecording"
-          type="danger"
-          :icon="'Microphone'"
-          size="large"
-          circle
-          @click="startRecording"
-          class="record-btn"
-        />
-        <el-button
-          v-else
-          type="info"
-          :icon="'VideoPause'"
-          size="large"
-          circle
-          @click="stopRecording"
-          class="record-btn recording"
-        />
-        <span class="record-time">{{ recordingStore.formattedDuration }}</span>
-      </div>
-      <canvas ref="canvasRef" width="600" height="120" class="waveform-canvas"></canvas>
-      <div v-if="recordingStore.hasRecording" class="record-actions">
-        <el-button :icon="'Refresh'" @click="recordingStore.clearRecording">重录</el-button>
-        <el-button type="primary" :icon="'DataAnalysis'" @click="analyzeAndGoFeedback" :loading="recordingStore.isAnalyzing">
-          {{ recordingStore.isAnalyzing ? '分析中...' : '分析发音' }}
-        </el-button>
-      </div>
+      <template v-if="isVerified">
+        <div class="recording-controls">
+          <el-button
+            v-if="!recordingStore.isRecording"
+            type="danger"
+            :icon="'Microphone'"
+            size="large"
+            circle
+            @click="startRecording"
+            class="record-btn"
+          />
+          <el-button
+            v-else
+            type="info"
+            :icon="'VideoPause'"
+            size="large"
+            circle
+            @click="stopRecording"
+            class="record-btn recording"
+          />
+          <span class="record-time">{{ recordingStore.formattedDuration }}</span>
+        </div>
+        <canvas ref="canvasRef" width="600" height="120" class="waveform-canvas"></canvas>
+        <div v-if="recordingStore.hasRecording" class="record-actions">
+          <el-button :icon="'Refresh'" @click="recordingStore.clearRecording">重录</el-button>
+          <el-button type="primary" :icon="'DataAnalysis'" @click="analyzeAndGoFeedback" :loading="recordingStore.isAnalyzing">
+            {{ recordingStore.isAnalyzing ? '分析中...' : '分析发音' }}
+          </el-button>
+        </div>
+      </template>
+      <template v-else>
+        <div class="verify-hint">
+          <el-icon color="#e6a23c" :size="20"><Warning /></el-icon>
+          <div class="verify-hint-text">
+            <strong>该单元暂未开放 AI 检测</strong>
+            <p>当前仅开放 12 个核心对比单元的录音分析（附录 A）。本单元可播放示范跟读，如需获得评分与纠音反馈，请前往核心单元练习。</p>
+          </div>
+          <el-button type="primary" size="small" @click="router.push('/library')">去核心单元</el-button>
+        </div>
+      </template>
     </div>
 
     <!-- 底部：常见误区 -->
@@ -218,12 +250,17 @@ onUnmounted(() => { stopVisualization() })
 .teaching-section { background: white; border-radius: 12px; padding: 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .unit-info { flex: 1; }
 .unit-character { font-size: 72px; font-weight: 700; color: #303133; line-height: 1; }
-.unit-pinyin { font-size: 28px; color: #409eff; margin: 8px 0; }
+.unit-pinyin { font-size: 28px; color: #409eff; margin: 8px 0; display: flex; align-items: center; gap: 10px; }
+.verify-tag { flex-shrink: 0; }
 .unit-desc { font-size: 14px; color: #909399; }
 .unit-detail { font-size: 14px; color: #606266; margin-top: 8px; line-height: 1.6; }
 .teaching-actions { display: flex; flex-direction: column; gap: 8px; }
 .recording-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); text-align: center; }
 .recording-section h3 { margin: 0 0 16px; font-size: 16px; color: #303133; }
+.verify-hint { display: flex; align-items: center; gap: 12px; text-align: left; padding: 16px; background: #fdf6ec; border: 1px solid #faecd8; border-radius: 8px; }
+.verify-hint-text { flex: 1; }
+.verify-hint-text strong { color: #b88230; }
+.verify-hint-text p { margin: 4px 0 0; color: #8a6d3b; font-size: 13px; line-height: 1.6; }
 .recording-controls { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 16px; }
 .record-btn { width: 64px; height: 64px; font-size: 24px; }
 .record-btn.recording { animation: pulse 1s infinite; }

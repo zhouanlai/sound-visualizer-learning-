@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { PINYIN_UNITS, TONE_UNITS } from '@/data/pinyinUnits'
+import { PINYIN_UNITS, TONE_UNITS, VERIFIED_UNITS, isVerifiedUnit } from '@/data/pinyinUnits'
 
 const router = useRouter()
 const searchQuery = ref('')
@@ -15,6 +15,7 @@ interface PronunciationUnit {
   category: 'initial' | 'final' | 'tone'
   color: string
   progress: number
+  verified?: boolean
 }
 
 // 手工精选单元（保留演示进度数据）
@@ -89,12 +90,31 @@ function buildToneUnits(): PronunciationUnit[] {
   }))
 }
 
-// 合并：手工精选（含进度）+ 自动生成全量（去重，手工优先）
+// 核心对比单元（附录A 首批 12 个，与后端 GROW-08 分级开放策略一致）
+function buildVerifiedUnits(): PronunciationUnit[] {
+  return Object.entries(VERIFIED_UNITS).map(([id, meta]) => ({
+    id,
+    pinyin: id,
+    character: meta.char,
+    pinyinTone: meta.pinyin,
+    description: `${meta.desc}（核心对比）`,
+    category: (id === 'a' || id === 'i' || id === 'u_u') ? 'final' as const
+      : (id === 'ma_tone' ? 'tone' as const : 'initial' as const),
+    color: '#f56c6c',
+    progress: 0,
+    verified: true,
+  }))
+}
+
+// 合并：手工精选（含进度）+ 核心对比单元 + 自动生成全量（去重，手工优先）
 const units: PronunciationUnit[] = [
   ...featuredUnits,
+  ...buildVerifiedUnits(),
   ...buildPinyinUnits(),
   ...buildToneUnits(),
-].filter((u, idx, arr) => arr.findIndex(x => x.id === u.id) === idx)
+]
+  .filter((u, idx, arr) => arr.findIndex(x => x.id === u.id) === idx)
+  .map(u => ({ ...u, verified: isVerifiedUnit(u.id) }))
 
 // 分类标签计数
 const counts = computed(() => ({
@@ -105,13 +125,17 @@ const counts = computed(() => ({
 }))
 
 const filteredUnits = computed(() => {
-  if (!searchQuery.value) return units
-  const q = searchQuery.value.toLowerCase()
-  return units.filter(u =>
-    u.pinyin.includes(q) ||
-    u.character.includes(q) ||
-    u.pinyinTone.includes(q)
-  )
+  let list = units
+  if (searchQuery.value) {
+    const q = searchQuery.value.toLowerCase()
+    list = list.filter(u =>
+      u.pinyin.includes(q) ||
+      u.character.includes(q) ||
+      u.pinyinTone.includes(q)
+    )
+  }
+  // 核心对比单元优先展示
+  return [...list].sort((a, b) => Number(b.verified ?? false) - Number(a.verified ?? false))
 })
 
 const categoryLabel = (cat: string) => {
@@ -178,6 +202,7 @@ const getProgressColor = (progress: number) => {
           />
 
           <div class="unit-status">
+            <el-tag v-if="unit.verified" type="success" size="small" effect="light">可检测</el-tag>
             <el-tag v-if="unit.progress >= 80" type="success" size="small">已完成</el-tag>
             <el-tag v-else-if="unit.progress > 0" type="warning" size="small">学习中</el-tag>
             <el-tag v-else type="info" size="small">未开始</el-tag>

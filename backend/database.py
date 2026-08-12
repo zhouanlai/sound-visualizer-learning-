@@ -44,7 +44,7 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_db(db_path: str = "pronunciation.db") -> None:
-    """初始化数据库：建表（幂等）"""
+    """初始化数据库：建表（幂等）+ 播种核心发音单元"""
     global DB_PATH
     DB_PATH = db_path
     conn = _connect()
@@ -80,11 +80,237 @@ def init_db(db_path: str = "pronunciation.db") -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_records_user ON learning_records(user_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS pronunciation_units (
+                id TEXT PRIMARY KEY,
+                pinyin TEXT NOT NULL DEFAULT '',
+                character TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                conclusion TEXT NOT NULL DEFAULT '',
+                detail TEXT NOT NULL DEFAULT '',
+                mistakes TEXT NOT NULL DEFAULT '[]',
+                steps TEXT NOT NULL DEFAULT '[]',
+                related TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'draft',
+                verified INTEGER NOT NULL DEFAULT 0,
+                order_no INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS feedbacks (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'learning',
+                page TEXT NOT NULL DEFAULT '',
+                unit_id TEXT NOT NULL DEFAULT '',
+                rating TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                handle_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id TEXT NOT NULL,
+                unit_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, unit_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS media_assets (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT 'audio',
+                mime TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL DEFAULT 0,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
+        _seed_units(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+# 已开放 50 个核心单元（12 个对比单元 + 38 个常用音节，检测已验证，可开放测试）
+CORE_UNITS = [
+    {"id": "a", "pinyin": "a", "character": "啊", "category": "韵母", "verified": 1,
+     "conclusion": "a 是开放元音：嘴巴自然张大，舌头平放，声音响亮通畅",
+     "detail": "上下齿距离约两指宽，舌位最低最前，气流不受阻碍。口腔开口度与 F1 共振峰直接相关。"},
+    {"id": "i", "pinyin": "i", "character": "一", "category": "韵母", "verified": 1,
+     "conclusion": "i 是高前元音：舌面抬向硬腭，嘴角向两侧展开",
+     "detail": "舌头前部抬高接近硬腭，上下齿几乎并拢，双唇呈微笑状。F2 共振峰高（约2400Hz）。"},
+    {"id": "u_u", "pinyin": "u/ü", "character": "五/鱼", "category": "韵母", "verified": 1,
+     "conclusion": "u 和 ü 都是圆唇元音，但舌位不同：u 舌位靠后，ü 舌位靠前",
+     "detail": "u 舌根抬高、唇最圆；ü 舌面抬向硬腭同时保持圆唇。可用 wu/yū 对比感受。"},
+    {"id": "m", "pinyin": "m", "character": "妈", "category": "声母", "verified": 1,
+     "conclusion": "m 是双唇鼻音：双唇闭合，软腭下垂，声音从鼻腔透出",
+     "detail": "双唇自然闭合，声带振动，气流大部分从鼻腔流出。手放鼻前可感受到气流。"},
+    {"id": "b_p", "pinyin": "b/p", "character": "八/趴", "category": "声母", "verified": 1,
+     "conclusion": "b 与 p 的差别是送气：b 不送气，p 送气（有显著气流喷出）",
+     "detail": "两者都是双唇清塞音。把手背放嘴前发 ba（无气流）与 pa（有气流）对比感受。"},
+    {"id": "d_t", "pinyin": "d/t", "character": "大/他", "category": "声母", "verified": 1,
+     "conclusion": "d 与 t 的差别是送气：d 不送气，t 送气",
+     "detail": "舌尖抵住上齿龈后突然放开。发 da 时无明显气流，发 ta 时有明显气流冲出。"},
+    {"id": "n_l", "pinyin": "n/l", "character": "那/辣", "category": "声母", "verified": 1,
+     "conclusion": "n 是鼻音、l 是边音：发 n 时气流走鼻腔，发 l 时气流从舌两侧流出",
+     "detail": "n：舌尖抵上齿龈、软腭下垂（可捏鼻验证）；l：舌尖抵上齿龈但软腭抬起，气流从舌侧通过。"},
+    {"id": "g_k", "pinyin": "g/k", "character": "歌/可", "category": "声母", "verified": 1,
+     "conclusion": "g 与 k 的差别是送气：g 不送气，k 送气",
+     "detail": "舌根抬起抵住软腭。发 ga 无气流、发 ka 有明显气流。"},
+    {"id": "j_q_x", "pinyin": "j/q/x", "character": "机/七/西", "category": "声母", "verified": 1,
+     "conclusion": "j、q、x 是舌面音：舌面前部抬起接近硬腭；j 不送气、q 送气、x 是擦音",
+     "detail": "j/q 成阻部位相同（一送气一不送气），x 留窄缝摩擦成声。注意不要发成 z/c/s 或 zh/ch/sh。"},
+    {"id": "z_zh", "pinyin": "z/zh", "character": "字/只", "category": "声母", "verified": 1,
+     "conclusion": "z（平舌）舌尖抵下齿背，zh（翘舌）舌尖卷向上颚前部",
+     "detail": "z/c/s 舌尖平放抵下齿背；zh/ch/sh/r 舌尖卷起抵硬腭前部。这是最常见的辨音难点。"},
+    {"id": "ma_tone", "pinyin": "mā/má/mǎ/mà", "character": "妈/麻/马/骂", "category": "声调", "verified": 1,
+     "conclusion": "四声是音高走向的变化：阴平高平、阳平上升、上声先降后升、去声急降",
+     "detail": "妈mā（55高平）、麻má（35上升）、马mǎ（214先降后升）、骂mà（51急降）。可用手划轨迹辅助。"},
+    {"id": "ma", "pinyin": "mā", "character": "妈", "category": "声母", "verified": 1,
+     "conclusion": "「妈」完整闭环单元：声母m + 韵母a + 第一声，完成学习-录音-结果-练习-再录音",
+     "detail": "先发双唇鼻音 m，随即滑向开口元音 a，音高保持高平。"},
+    # ===== 已开放常用音节单元（38 个） =====
+    {"id": "ba", "pinyin": "bā", "character": "八", "category": "声母", "verified": 1,
+     "conclusion": "b 是不送气双唇塞音：双唇闭合后突然放开",
+     "detail": "双唇先闭拢憋气，然后突然放开，声带不振动（清音），无气流冲出。"},
+    {"id": "pa", "pinyin": "pā", "character": "趴", "category": "声母", "verified": 1,
+     "conclusion": "p 是送气双唇塞音：与 b 部位相同，但有明显气流冲出",
+     "detail": "成阻部位与 b 相同，但除阻时有较强气流。手背放嘴前可感受到喷气。"},
+    {"id": "ta", "pinyin": "tā", "character": "他", "category": "声母", "verified": 1,
+     "conclusion": "t 是送气舌尖中塞音：舌尖抵上齿龈后放开，气流冲出",
+     "detail": "舌尖抵住上齿龈，突然放开时气流从口中冲出，声带不振动。"},
+    {"id": "yi", "pinyin": "yī", "character": "一", "category": "韵母", "verified": 1,
+     "conclusion": "y 是半元音，发音与高前元音 i 相近",
+     "detail": "声母 y 由 i 变化而来，舌面抬高接近硬腭，开口度小。"},
+    {"id": "wu", "pinyin": "wǔ", "character": "五", "category": "韵母", "verified": 1,
+     "conclusion": "w 是半元音，发音与高后元音 u 相近",
+     "detail": "声母 w 由 u 变化而来，舌根抬高、双唇收圆突出。"},
+    {"id": "yu", "pinyin": "yú", "character": "鱼", "category": "韵母", "verified": 1,
+     "conclusion": "yu 实际发 ü 的音：舌面前部抬高同时圆唇",
+     "detail": "ü 是撮口呼：舌位同 i，但双唇收圆。注意不要发成 u 或 i。"},
+    {"id": "mao", "pinyin": "māo", "character": "猫", "category": "声母", "verified": 1,
+     "conclusion": "m + ao 复韵母：从双唇闭合滑向 a-o",
+     "detail": "先发双唇鼻音 m，随即元音由 a 滑向 o，舌位由低到高。"},
+    {"id": "gou", "pinyin": "gǒu", "character": "狗", "category": "声母", "verified": 1,
+     "conclusion": "g + ou 复韵母：不送气舌根音接复合元音",
+     "detail": "g 舌根抵软腭不送气，随后元音由 o 滑向 u。"},
+    {"id": "niao", "pinyin": "niǎo", "character": "鸟", "category": "声母", "verified": 1,
+     "conclusion": "n + iao 三合复韵母：鼻音后元音由 i 经 a 滑向 o",
+     "detail": "n 舌尖抵上齿龈鼻音，随后 i-a-o 三个元音连续滑动。"},
+    {"id": "ma_t2", "pinyin": "má", "character": "麻", "category": "声调", "verified": 1,
+     "conclusion": "阳平（第二声）：音高从 3 度直线上升到 5 度",
+     "detail": "麻 má 为高升调（35）。起音中等偏高，逐渐上扬，手可做上划轨迹。"},
+    {"id": "ma_t3", "pinyin": "mǎ", "character": "马", "category": "声调", "verified": 1,
+     "conclusion": "上声（第三声）：音高先降后升（214）",
+     "detail": "马 mǎ 为降升调：先降到低处再回升，音程长、拐点明显。"},
+    {"id": "bo", "pinyin": "bō", "character": "波", "category": "声母", "verified": 1,
+     "conclusion": "b + o 单韵母：不送气双唇音接圆唇中元音",
+     "detail": "先闭双唇发 b，随即开口发 o，舌位后半高，双唇略圆。"},
+    {"id": "bi", "pinyin": "bǐ", "character": "比", "category": "声母", "verified": 1,
+     "conclusion": "b + i 高前元音：双唇音接齐齿呼",
+     "detail": "b 除阻后舌面立即抬高接近硬腭，嘴角向两侧展开，上声调。"},
+    {"id": "bu", "pinyin": "bù", "character": "不", "category": "声母", "verified": 1,
+     "conclusion": "b + u 高后元音：双唇音接合口呼",
+     "detail": "b 除阻后舌根抬高、双唇收圆突出，发 u，去声调。"},
+    {"id": "po", "pinyin": "pō", "character": "坡", "category": "声母", "verified": 1,
+     "conclusion": "p + o 单韵母：送气双唇音接圆唇中元音",
+     "detail": "p 除阻时气流明显冲出，随后发 o，舌位后半高、唇圆。"},
+    {"id": "pi", "pinyin": "pí", "character": "皮", "category": "声母", "verified": 1,
+     "conclusion": "p + i 高前元音：送气双唇音接齐齿呼",
+     "detail": "p 送气后舌面抬向硬腭发 i，阳平调，音高上扬。"},
+    {"id": "pu", "pinyin": "pǔ", "character": "普", "category": "声母", "verified": 1,
+     "conclusion": "p + u 高后元音：送气双唇音接合口呼",
+     "detail": "p 送气后舌根抬高、双唇收圆发 u，上声调。"},
+    {"id": "mo", "pinyin": "mō", "character": "摸", "category": "声母", "verified": 1,
+     "conclusion": "m + o 单韵母：双唇鼻音接圆唇中元音",
+     "detail": "m 双唇闭合、气流走鼻腔，随即发 o，手放鼻前可感受气流。"},
+    {"id": "mi", "pinyin": "mǐ", "character": "米", "category": "声母", "verified": 1,
+     "conclusion": "m + i 高前元音：双唇鼻音接齐齿呼",
+     "detail": "m 鼻音后舌面抬向硬腭发 i，上声调。"},
+    {"id": "mu", "pinyin": "mù", "character": "木", "category": "声母", "verified": 1,
+     "conclusion": "m + u 高后元音：双唇鼻音接合口呼",
+     "detail": "m 鼻音后舌根抬高、双唇收圆发 u，去声调。"},
+    {"id": "fa", "pinyin": "fā", "character": "发", "category": "声母", "verified": 1,
+     "conclusion": "f 是唇齿清擦音：上齿轻触下唇，气流摩擦成声",
+     "detail": "上齿轻触下唇内缘，气流从窄缝中挤出产生摩擦，声带不振动。"},
+    {"id": "fei", "pinyin": "fēi", "character": "飞", "category": "声母", "verified": 1,
+     "conclusion": "f + ei 复韵母：唇齿擦音接前响复元音",
+     "detail": "f 摩擦成声后，元音由 e 滑向 i，前重后轻。"},
+    {"id": "da", "pinyin": "dà", "character": "大", "category": "声母", "verified": 1,
+     "conclusion": "d + a 开口呼：不送气舌尖中塞音",
+     "detail": "舌尖抵上齿龈除阻后发 a，去声调，音高急降。"},
+    {"id": "duo", "pinyin": "duō", "character": "多", "category": "声母", "verified": 1,
+     "conclusion": "d + uo 复韵母：不送气舌尖音接后响复元音",
+     "detail": "d 除阻后元音由 u 滑向 o，后响复元音前轻后重。"},
+    {"id": "di", "pinyin": "dì", "character": "地", "category": "声母", "verified": 1,
+     "conclusion": "d + i 高前元音：不送气舌尖中塞音接齐齿呼",
+     "detail": "d 除阻后舌面抬向硬腭发 i，去声调。"},
+    {"id": "du", "pinyin": "dú", "character": "读", "category": "声母", "verified": 1,
+     "conclusion": "d + u 高后元音：不送气舌尖中塞音接合口呼",
+     "detail": "d 除阻后舌根抬高、双唇收圆发 u，阳平调。"},
+    {"id": "te", "pinyin": "tè", "character": "特", "category": "声母", "verified": 1,
+     "conclusion": "t + e 单元音：送气舌尖中塞音接不圆唇中元音",
+     "detail": "t 送气后发 e，舌位半高偏后、唇不圆，去声调。"},
+    {"id": "ti", "pinyin": "tí", "character": "题", "category": "声母", "verified": 1,
+     "conclusion": "t + i 高前元音：送气舌尖中塞音接齐齿呼",
+     "detail": "t 送气后舌面抬向硬腭发 i，阳平调。"},
+    {"id": "tu", "pinyin": "tú", "character": "图", "category": "声母", "verified": 1,
+     "conclusion": "t + u 高后元音：送气舌尖中塞音接合口呼",
+     "detail": "t 送气后舌根抬高、双唇收圆发 u，阳平调。"},
+    {"id": "na", "pinyin": "nà", "character": "那", "category": "声母", "verified": 1,
+     "conclusion": "n + a 开口呼：舌尖中鼻音，气流走鼻腔",
+     "detail": "n 舌尖抵上齿龈、软腭下垂，气流从鼻腔透出，随即发 a，去声调。"},
+    {"id": "ni", "pinyin": "nǐ", "character": "你", "category": "声母", "verified": 1,
+     "conclusion": "n + i 高前元音：舌尖中鼻音接齐齿呼",
+     "detail": "n 鼻音后舌面抬向硬腭发 i，上声调。"},
+    {"id": "nu", "pinyin": "nǔ", "character": "努", "category": "声母", "verified": 1,
+     "conclusion": "n + u 高后元音：舌尖中鼻音接合口呼",
+     "detail": "n 鼻音后舌根抬高、双唇收圆发 u，上声调。"},
+    {"id": "la", "pinyin": "lā", "character": "拉", "category": "声母", "verified": 1,
+     "conclusion": "l + a 开口呼：舌尖中边音，气流从舌两侧流出",
+     "detail": "l 舌尖抵上齿龈但软腭抬起，气流从舌侧通过，与 n（鼻音）形成对比。"},
+    {"id": "li", "pinyin": "lǐ", "character": "里", "category": "声母", "verified": 1,
+     "conclusion": "l + i 高前元音：舌尖中边音接齐齿呼",
+     "detail": "l 边音后舌面抬向硬腭发 i，上声调。"},
+    {"id": "lu", "pinyin": "lù", "character": "路", "category": "声母", "verified": 1,
+     "conclusion": "l + u 高后元音：舌尖中边音接合口呼",
+     "detail": "l 边音后舌根抬高、双唇收圆发 u，去声调。"},
+    {"id": "ge", "pinyin": "gē", "character": "歌", "category": "声母", "verified": 1,
+     "conclusion": "g + e 单元音：不送气舌根音接不圆唇中元音",
+     "detail": "g 舌根抵软腭不送气，随后发 e，舌位半高偏后、唇不圆。"},
+    {"id": "gu", "pinyin": "gǔ", "character": "古", "category": "声母", "verified": 1,
+     "conclusion": "g + u 高后元音：不送气舌根音接合口呼",
+     "detail": "g 除阻后舌根抬高、双唇收圆发 u，上声调。"},
+    {"id": "ka", "pinyin": "kǎ", "character": "卡", "category": "声母", "verified": 1,
+     "conclusion": "k + a 开口呼：送气舌根音，气流明显冲出",
+     "detail": "k 与 g 成阻部位相同，但除阻时有较强气流冲出，随后发 a，上声调。"},
+]
+
+
+# 核心单元 id 集合（受保护，不可删除）
+CORE_UNITS_IDS = {u["id"] for u in CORE_UNITS}
+
+
+def _seed_units(conn: sqlite3.Connection) -> None:
+    """播种核心发音单元（幂等：仅插入不存在的单元）"""
+    now = _now()
+    for idx, u in enumerate(CORE_UNITS):
+        exists = conn.execute("SELECT 1 FROM pronunciation_units WHERE id = ?", (u["id"],)).fetchone()
+        if exists:
+            continue
+        conn.execute(
+            """INSERT INTO pronunciation_units
+               (id, pinyin, character, category, description, conclusion, detail, mistakes, steps,
+                related, status, verified, order_no, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 'published', ?, ?, ?, ?)""",
+            (u["id"], u["pinyin"], u["character"], u["category"], "", u["conclusion"], u["detail"],
+             u["verified"], idx + 1, now, now),
+        )
 
 
 def _default_progress(user_id: str) -> dict:
@@ -364,3 +590,356 @@ def get_stats() -> dict:
         }
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 发音单元 CRUD（后台内容管理）
+# ---------------------------------------------------------------------------
+def _unit_to_dict(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "pinyin": row["pinyin"],
+        "character": row["character"],
+        "category": row["category"],
+        "description": row["description"],
+        "conclusion": row["conclusion"],
+        "detail": row["detail"],
+        "mistakes": json.loads(row["mistakes"] or "[]"),
+        "steps": json.loads(row["steps"] or "[]"),
+        "related": json.loads(row["related"] or "[]"),
+        "status": row["status"],
+        "verified": bool(row["verified"]),
+        "order": row["order_no"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def get_units(status: str = "") -> list[dict]:
+    """获取发音单元列表；status 为空返回全部"""
+    conn = _connect()
+    try:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM pronunciation_units WHERE status = ? ORDER BY order_no", (status,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM pronunciation_units ORDER BY order_no"
+            ).fetchall()
+        return [_unit_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_unit(unit_id: str) -> Optional[dict]:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM pronunciation_units WHERE id = ?", (unit_id,)
+        ).fetchone()
+        return _unit_to_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def create_unit(data: dict) -> str:
+    now = _now()
+    conn = _connect()
+    try:
+        unit_id = data.get("id") or uuid.uuid4().hex[:8]
+        conn.execute(
+            """INSERT INTO pronunciation_units
+               (id, pinyin, character, category, description, conclusion, detail, mistakes, steps,
+                related, status, verified, order_no, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (unit_id, data.get("pinyin", ""), data.get("character", ""), data.get("category", "声母"),
+             data.get("description", ""), data.get("conclusion", ""), data.get("detail", ""),
+             json.dumps(data.get("mistakes", []), ensure_ascii=False),
+             json.dumps(data.get("steps", []), ensure_ascii=False),
+             json.dumps(data.get("related", []), ensure_ascii=False),
+             data.get("status", "draft"), 1 if data.get("verified") else 0,
+             int(data.get("order", 0)), now, now),
+        )
+        conn.commit()
+        return unit_id
+    finally:
+        conn.close()
+
+
+def update_unit(unit_id: str, data: dict) -> bool:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM pronunciation_units WHERE id = ?", (unit_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        cur = _unit_to_dict(row)
+        merged = {**cur, **{k: v for k, v in data.items() if k in cur or k == "order"}}
+        conn.execute(
+            """UPDATE pronunciation_units SET pinyin=?, character=?, category=?, description=?,
+               conclusion=?, detail=?, mistakes=?, steps=?, related=?, status=?, verified=?,
+               order_no=?, updated_at=? WHERE id=?""",
+            (merged["pinyin"], merged["character"], merged["category"], merged["description"],
+             merged["conclusion"], merged["detail"],
+             json.dumps(merged["mistakes"], ensure_ascii=False),
+             json.dumps(merged["steps"], ensure_ascii=False),
+             json.dumps(merged["related"], ensure_ascii=False),
+             merged["status"], 1 if merged["verified"] else 0, merged["order"], _now(), unit_id),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def delete_unit(unit_id: str) -> bool:
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM pronunciation_units WHERE id = ?", (unit_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 用户反馈 CRUD（大众反馈闭环）
+# ---------------------------------------------------------------------------
+def create_feedback(data: dict) -> str:
+    fb_id = uuid.uuid4().hex
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT INTO feedbacks
+               (id, user_id, type, page, unit_id, rating, message, status, handle_note, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', '', ?)""",
+            (fb_id, data.get("userId", "default_user"), data.get("type", "learning"),
+             data.get("page", ""), data.get("unitId", ""), data.get("rating", ""),
+             data.get("message", ""), _now()),
+        )
+        conn.commit()
+        return fb_id
+    finally:
+        conn.close()
+
+
+def get_feedbacks(status: str = "") -> list[dict]:
+    conn = _connect()
+    try:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM feedbacks WHERE status = ? ORDER BY created_at DESC", (status,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM feedbacks ORDER BY created_at DESC"
+            ).fetchall()
+        return [
+            {
+                "id": r["id"], "userId": r["user_id"], "type": r["type"], "page": r["page"],
+                "unitId": r["unit_id"], "rating": r["rating"], "message": r["message"],
+                "status": r["status"], "handleNote": r["handle_note"], "createdAt": r["created_at"],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def update_feedback_status(fb_id: str, status: str, note: str = "") -> bool:
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            "UPDATE feedbacks SET status = ?, handle_note = ? WHERE id = ?",
+            (status, note, fb_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 收藏 CRUD（注册用户收藏发音/单元）
+# ---------------------------------------------------------------------------
+def get_favorites(user_id: str) -> list[str]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT unit_id FROM favorites WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
+        ).fetchall()
+        return [r["unit_id"] for r in rows]
+    finally:
+        conn.close()
+
+
+def add_favorite(user_id: str, unit_id: str) -> None:
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO favorites (user_id, unit_id, created_at) VALUES (?, ?, ?)",
+            (user_id, unit_id, _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def remove_favorite(user_id: str, unit_id: str) -> None:
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM favorites WHERE user_id = ? AND unit_id = ?", (user_id, unit_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 媒体资源 CRUD（后台媒体上传）
+# ---------------------------------------------------------------------------
+def create_media(name: str, file_type: str, mime: str, size: int, path: str) -> str:
+    media_id = uuid.uuid4().hex
+    conn = _connect()
+    try:
+        conn.execute(
+            """INSERT INTO media_assets (id, name, file_type, mime, size, path, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (media_id, name, file_type, mime, size, path, _now()),
+        )
+        conn.commit()
+        return media_id
+    finally:
+        conn.close()
+
+
+def get_media_list() -> list[dict]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM media_assets ORDER BY created_at DESC"
+        ).fetchall()
+        return [
+            {"id": r["id"], "name": r["name"], "type": r["file_type"], "mime": r["mime"],
+             "size": r["size"], "path": r["path"], "createdAt": r["created_at"]}
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_media(media_id: str) -> Optional[dict]:
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM media_assets WHERE id = ?", (media_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {"id": row["id"], "name": row["name"], "type": row["file_type"],
+                "mime": row["mime"], "size": row["size"], "path": row["path"],
+                "createdAt": row["created_at"]}
+    finally:
+        conn.close()
+
+
+def delete_media(media_id: str) -> bool:
+    conn = _connect()
+    try:
+        cur = conn.execute("DELETE FROM media_assets WHERE id = ?", (media_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# 学习记录删除（声音档案用户控制）
+# ---------------------------------------------------------------------------
+def delete_learning_record(record_id: str, user_id: str = "") -> bool:
+    """删除单条学习记录；user_id 非空时校验归属。删除后重算该用户进度。"""
+    conn = _connect()
+    try:
+        conn.execute("BEGIN")
+        if user_id:
+            cur = conn.execute(
+                "DELETE FROM learning_records WHERE id = ? AND user_id = ?", (record_id, user_id)
+            )
+        else:
+            cur = conn.execute("DELETE FROM learning_records WHERE id = ?", (record_id,))
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        _recalc_progress(conn, user_id or _record_owner(conn, record_id))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def delete_all_learning_records(user_id: str) -> int:
+    """删除用户全部学习记录，返回删除条数，并重置进度"""
+    conn = _connect()
+    try:
+        conn.execute("BEGIN")
+        cur = conn.execute("DELETE FROM learning_records WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_progress WHERE user_id = ?", (user_id,))
+        conn.commit()
+        return cur.rowcount
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _record_owner(conn: sqlite3.Connection, record_id: str) -> str:
+    row = conn.execute(
+        "SELECT user_id FROM learning_records WHERE id = ?", (record_id,)
+    ).fetchone()
+    return row["user_id"] if row else "default_user"
+
+
+def _recalc_progress(conn: sqlite3.Connection, user_id: str) -> None:
+    """按剩余记录重算用户进度（删除后一致性）"""
+    row = conn.execute(
+        "SELECT * FROM user_progress WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    if row is None:
+        return
+    progress = _row_to_progress(row)
+    records = conn.execute(
+        "SELECT * FROM learning_records WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    progress["totalPractice"] = len(records)
+    progress["averageScore"] = round(
+        (sum(r["score"] for r in records) / len(records)), 1
+    ) if records else 0.0
+    progress["lastPracticeAt"] = records[0]["created_at"] if records else ""
+    for unit in progress["unitProgress"]:
+        unit["practiceCount"] = 0
+        unit["bestScore"] = 0
+        unit["lastPracticeAt"] = ""
+        unit["status"] = "not_started"
+    for r in records:
+        unit = next((u for u in progress["unitProgress"] if u["unitId"] == r["unit_id"]), None)
+        if unit is None:
+            unit = {"unitId": r["unit_id"], "pinyin": r["pinyin"], "character": r["character"],
+                    "bestScore": 0, "practiceCount": 0, "lastPracticeAt": "", "status": "not_started"}
+            progress["unitProgress"].append(unit)
+        unit["practiceCount"] += 1
+        unit["lastPracticeAt"] = r["created_at"]
+        if r["score"] > unit["bestScore"]:
+            unit["bestScore"] = r["score"]
+        if r["score"] >= 80 and unit["status"] != "completed":
+            unit["status"] = "completed"
+        elif unit["status"] == "not_started":
+            unit["status"] = "in_progress"
+    progress["completedUnits"] = sum(
+        1 for u in progress["unitProgress"] if u["status"] == "completed"
+    )
+    _upsert_progress(conn, progress)

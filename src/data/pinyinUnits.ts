@@ -397,3 +397,79 @@ export const ALL_UNITS: Record<string, PinyinUnitMeta> = {
 export function getUnitMeta(key: string): PinyinUnitMeta | undefined {
   return ALL_UNITS[key]
 }
+
+// ============================================================
+// 已验证核心单元（共 50 个：12 个对比单元 + 38 个常用音节，与后端 GROW-08 分级开放策略保持一致）
+// 仅这些单元开放 AI 检测（录音分析），其余单元仅可学习/播放示范
+// ============================================================
+export interface VerifiedUnitMeta {
+  pinyin: string          // 展示用拼音（含声调标记）
+  targets: string[]       // 该单元需要朗读的目标音节（如 'ma1'）
+  desc: string            // 单元描述
+  char: string            // 代表汉字（用于卡片展示）
+}
+
+export const VERIFIED_UNITS: Record<string, VerifiedUnitMeta> = {
+  a:       { pinyin: 'a',       targets: ['a1'],              desc: '开口呼韵母',      char: '啊' },
+  i:       { pinyin: 'i',       targets: ['i1'],              desc: '齐齿呼韵母',      char: '衣' },
+  u_u:     { pinyin: 'u/ü',     targets: ['wu1', 'yu1'],      desc: '合口呼/撮口呼',   char: '五' },
+  m:       { pinyin: 'm',       targets: ['ma1'],             desc: '双唇鼻音',        char: '妈' },
+  b_p:     { pinyin: 'b/p',     targets: ['ba1', 'pa1'],      desc: '双唇音送气对比',  char: '八' },
+  d_t:     { pinyin: 'd/t',     targets: ['da1', 'ta1'],      desc: '舌尖音送气对比',  char: '大' },
+  n_l:     { pinyin: 'n/l',     targets: ['na1', 'la1'],      desc: '鼻音边音对比',    char: '那' },
+  g_k:     { pinyin: 'g/k',     targets: ['ga1', 'ka1'],      desc: '舌根音送气对比',  char: '嘎' },
+  j_q_x:   { pinyin: 'j/q/x',   targets: ['ji1', 'qi1', 'xi1'], desc: '舌面音对比',    char: '机' },
+  z_zh:    { pinyin: 'z/zh',    targets: ['za1', 'zha1'],     desc: '平翘舌音对比',    char: '杂' },
+  ma_tone: { pinyin: 'mā/má/mǎ/mà', targets: ['ma1', 'ma2', 'ma3', 'ma4'], desc: '四声调练习', char: '妈' },
+  ma:      { pinyin: 'mā',      targets: ['ma1'],             desc: '双唇鼻音+开口呼', char: '妈' },
+  // ===== 已开放常用音节单元（38 个） =====
+  ba:      { pinyin: 'bā',      targets: ['ba1'],             desc: '不送气双唇音',    char: '八' },
+  pa:      { pinyin: 'pā',      targets: ['pa1'],             desc: '送气双唇音',      char: '趴' },
+  ta:      { pinyin: 'tā',      targets: ['ta1'],             desc: '送气舌尖中音',    char: '他' },
+  yi:      { pinyin: 'yī',      targets: ['yi1'],             desc: '半元音 y+i',      char: '一' },
+  wu:      { pinyin: 'wǔ',      targets: ['wu3'],             desc: '半元音 w+u',      char: '五' },
+  yu:      { pinyin: 'yú',      targets: ['yu2'],             desc: '撮口呼 ü',        char: '鱼' },
+  mao:     { pinyin: 'māo',     targets: ['mao1'],            desc: '双唇鼻音+ao',    char: '猫' },
+  gou:     { pinyin: 'gǒu',     targets: ['gou3'],            desc: '舌根音+ou',      char: '狗' },
+  niao:    { pinyin: 'niǎo',    targets: ['niao3'],           desc: '鼻音+iao',       char: '鸟' },
+  ma_t2:   { pinyin: 'má',      targets: ['ma2'],             desc: '阳平声调',       char: '麻' },
+  ma_t3:   { pinyin: 'mǎ',      targets: ['ma3'],             desc: '上声声调',       char: '马' },
+  bo:      { pinyin: 'bō',      targets: ['bo1'],             desc: '双唇音+o',       char: '波' },
+  bi:      { pinyin: 'bǐ',      targets: ['bi3'],             desc: '双唇音+i',       char: '比' },
+  bu:      { pinyin: 'bù',      targets: ['bu4'],             desc: '双唇音+u',       char: '不' },
+  po:      { pinyin: 'pō',      targets: ['po1'],             desc: '送气双唇音+o',   char: '坡' },
+  pi:      { pinyin: 'pí',      targets: ['pi2'],             desc: '送气双唇音+i',   char: '皮' },
+  pu:      { pinyin: 'pǔ',      targets: ['pu3'],             desc: '送气双唇音+u',   char: '普' },
+  mo:      { pinyin: 'mō',      targets: ['mo1'],             desc: '双唇鼻音+o',     char: '摸' },
+  mi:      { pinyin: 'mǐ',      targets: ['mi3'],             desc: '双唇鼻音+i',     char: '米' },
+  mu:      { pinyin: 'mù',      targets: ['mu4'],             desc: '双唇鼻音+u',     char: '木' },
+  fa:      { pinyin: 'fā',      targets: ['fa1'],             desc: '唇齿擦音+a',     char: '发' },
+  fei:     { pinyin: 'fēi',     targets: ['fei1'],            desc: '唇齿擦音+ei',   char: '飞' },
+  da:      { pinyin: 'dà',      targets: ['da4'],             desc: '舌尖中音+a',     char: '大' },
+  duo:     { pinyin: 'duō',     targets: ['duo1'],            desc: '舌尖中音+uo',   char: '多' },
+  di:      { pinyin: 'dì',      targets: ['di4'],             desc: '舌尖中音+i',     char: '地' },
+  du:      { pinyin: 'dú',      targets: ['du2'],             desc: '舌尖中音+u',     char: '读' },
+  te:      { pinyin: 'tè',      targets: ['te4'],             desc: '送气舌尖音+e',   char: '特' },
+  ti:      { pinyin: 'tí',      targets: ['ti2'],             desc: '送气舌尖音+i',   char: '题' },
+  tu:      { pinyin: 'tú',      targets: ['tu2'],             desc: '送气舌尖音+u',   char: '图' },
+  na:      { pinyin: 'nà',      targets: ['na4'],             desc: '舌尖中鼻音+a',   char: '那' },
+  ni:      { pinyin: 'nǐ',      targets: ['ni3'],             desc: '舌尖中鼻音+i',   char: '你' },
+  nu:      { pinyin: 'nǔ',      targets: ['nu3'],             desc: '舌尖中鼻音+u',   char: '努' },
+  la:      { pinyin: 'lā',      targets: ['la1'],             desc: '舌尖中边音+a',   char: '拉' },
+  li:      { pinyin: 'lǐ',      targets: ['li3'],             desc: '舌尖中边音+i',   char: '里' },
+  lu:      { pinyin: 'lù',      targets: ['lu4'],             desc: '舌尖中边音+u',   char: '路' },
+  ge:      { pinyin: 'gē',      targets: ['ge1'],             desc: '舌根音+e',       char: '歌' },
+  gu:      { pinyin: 'gǔ',      targets: ['gu3'],             desc: '舌根音+u',       char: '古' },
+  ka:      { pinyin: 'kǎ',      targets: ['ka3'],             desc: '送气舌根音+a',   char: '卡' },
+}
+
+// 核心单元 ID 集合（供学习页/发音库/地图快速判断是否开放检测）
+export const VERIFIED_UNIT_IDS: string[] = Object.keys(VERIFIED_UNITS)
+
+export function isVerifiedUnit(id: string): boolean {
+  return id in VERIFIED_UNITS
+}
+
+export function getVerifiedUnitMeta(id: string): VerifiedUnitMeta | undefined {
+  return VERIFIED_UNITS[id]
+}

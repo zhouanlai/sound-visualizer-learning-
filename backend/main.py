@@ -8,10 +8,27 @@ import json
 import tempfile
 import numpy as np
 from typing import Optional
+from uuid import uuid4
 
 # 必须在 import torch 之前设置：Wav2Vec2 使用 weight_norm，MPS(Apple Silicon)
 # 暂未实现该算子，开启 fallback 让不支持的算子回退 CPU，其余仍走 MPS 加速。
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# 防御 IDE 注入的 Python shim（如 CodeBuddy 通过 PYTHONPATH 注入 sitecustomize，
+# 会拦截 librosa 写 __pycache__ 临时文件时的 unlink 操作，导致 SystemExit → 接口 500）。
+# 注意：sitecustomize 在解释器启动时已加载，本进程内清理无法撤销已注入的行为；
+# 正确的做法是用 start-dev.sh（env -u PYTHONPATH）或 `env -u PYTHONPATH python3 main.py` 启动。
+# 此处仍清理环境变量，供后续 subprocess（ffmpeg 等）不继承 shim。
+_pythonpath = os.environ.get("PYTHONPATH", "")
+_shim_markers = ("codebuddy", "genie", "vendor/shim", "extensions/genie")
+if any(m in _pythonpath.lower() for m in _shim_markers):
+    print(
+        "[警告] 检测到 IDE 注入的 Python shim（PYTHONPATH 含 vendor/shim），"
+        "可能导致音频分析接口 500。建议改用 ./start-dev.sh 或 "
+        "`env -u PYTHONPATH python3 main.py` 启动。"
+    )
+    parts = [p for p in _pythonpath.split(os.pathsep) if p and not any(m in p.lower() for m in _shim_markers)]
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,13 +40,16 @@ import torch
 import database
 from audio_analyzer import (
     analyze_with_deep_learning,
+    analyze_audio_quality,
     estimate_formants,
     compute_fluency_score,
     asr_status,
     load_asr_model,
     standard_tone_curve,
     UNIT_REFERENCE,
+    unit_verified,
 )
+from feedback_engine import build_four_step_feedback, compute_reliability
 
 app = FastAPI(title="看得见的声音 API", version="1.0.0")
 
@@ -72,10 +92,16 @@ class AudioAnalysisResult(BaseModel):
 
 class FeedbackItem(BaseModel):
     type: str  # error, warning, suggestion
-    category: str  # tone, pronunciation, fluency, rhythm
-    message: str
-    detail: str
-    improvement: str
+    category: str  # tone, pronunciation, fluency, rhythm, quality
+    phenomenon: str  # ① 现象
+    link: str        # ② 可能相关环节
+    hint: str        # ③ 可感知提示
+    practice: str    # ④ 安全短练习
+    severity: int = 1
+    # 兼容旧字段
+    message: str = ""
+    detail: str = ""
+    improvement: str = ""
 
 class PronunciationAssessment(BaseModel):
     score: float
@@ -84,10 +110,41 @@ class PronunciationAssessment(BaseModel):
     pronunciation: float
     feedback: list[FeedbackItem]
     audio_analysis: AudioAnalysisResult
+    # 录音质量五维（RES-01）
+    quality: dict = {}
+    # 结果可靠性（RES-07）
+    reliability: str = "reliable"  # reliable / reference_only / not_available
+    reliability_note: str = ""
+    # 边界声明（RES-08）
+    boundary: dict = {}
+    # 是否可评价（录音不合格时 False，停止评价 AC-07）
+    evaluable: bool = True
 
-# 标准发音参数（模拟）
+# 结果边界声明（RES-07/08）：不作为等级认定与医学诊断，明示影响因素
+BOUNDARY = {
+    "statement": "检测结果基于声学特征（基频/共振峰）与语音识别模型，仅用于发音学习参考，不作为普通话水平等级认定依据，也不构成医学诊断。",
+    "scope": "当前开放检测的为已开放的 50 个核心单元（12 个对比单元 + 38 个常用音节，声学特征已验证）；其余内容为学习模式，检测功能将随验证逐步开放。",
+    "factors": [
+        "录音环境：背景噪声、回声影响特征提取",
+        "录音条件：距离、音量、截幅影响基频估计",
+        "模型置信度：语音识别在噪声/口音下的置信度有限",
+    ],
+}
+
+# 标准发音参数（附录A核心单元 + 兼容旧单元）
 STANDARD_PARAMS = {
     "ma": {"f0_mean": 200, "f0_std": 10, "f1_range": (200, 400), "f2_range": (800, 1200), "tone": 1},
+    "a": {"f0_mean": 200, "f0_std": 12, "f1_range": (500, 900), "f2_range": (1000, 1500), "tone": 1},
+    "i": {"f0_mean": 220, "f0_std": 10, "f1_range": (200, 350), "f2_range": (2200, 2900), "tone": 1},
+    "u_u": {"f0_mean": 190, "f0_std": 15, "f1_range": (250, 420), "f2_range": (700, 1000), "tone": 1},
+    "m": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 400), "f2_range": (800, 1200), "tone": 1},
+    "b_p": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 450), "f2_range": (900, 1300), "tone": 1},
+    "d_t": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 450), "f2_range": (900, 1300), "tone": 1},
+    "n_l": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 450), "f2_range": (900, 1300), "tone": 1},
+    "g_k": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 450), "f2_range": (900, 1300), "tone": 1},
+    "j_q_x": {"f0_mean": 210, "f0_std": 12, "f1_range": (200, 350), "f2_range": (2200, 2900), "tone": 1},
+    "z_zh": {"f0_mean": 200, "f0_std": 12, "f1_range": (200, 450), "f2_range": (1000, 1400), "tone": 1},
+    "ma_tone": {"f0_mean": 200, "f0_std": 15, "f1_range": (200, 450), "f2_range": (900, 1300), "tone": 1},
     "ba": {"f0_mean": 200, "f0_std": 10, "f1_range": (200, 400), "f2_range": (800, 1200), "tone": 1},
     "pa": {"f0_mean": 200, "f0_std": 10, "f1_range": (200, 400), "f2_range": (800, 1200), "tone": 1},
     "ta": {"f0_mean": 200, "f0_std": 10, "f1_range": (200, 400), "f2_range": (800, 1200), "tone": 1},
@@ -129,15 +186,20 @@ def analyze_audio(audio_data: np.ndarray, sr: int) -> AudioAnalysisResult:
     )
 
 def assess_pronunciation(
-    audio_analysis: AudioAnalysisResult, unit_id: str, fluency: float
+    audio_analysis: AudioAnalysisResult,
+    unit_id: str,
+    fluency: float,
+    quality: dict,
 ) -> PronunciationAssessment:
-    """评估发音质量（流利度为真实VAD计算，非随机值）"""
+    """评估发音质量：四步反馈 + 录音质量 + 结果可靠性（RES-01/05/07）"""
     standard = STANDARD_PARAMS.get(unit_id, STANDARD_PARAMS["ma"])
-    
+    ref = UNIT_REFERENCE.get(unit_id) or {}
+    targets = ref.get("targets") or [ref.get("pinyin", "ma1")]
+
     # 计算基频相似度
     f0_array = np.array(audio_analysis.f0)
     f0_voiced = f0_array[f0_array > 0]
-    
+
     if len(f0_voiced) > 0:
         f0_mean = np.mean(f0_voiced)
         f0_std = np.std(f0_voiced)
@@ -145,85 +207,67 @@ def assess_pronunciation(
         tone_stability = max(0, 100 - f0_std / standard["f0_std"] * 20)
     else:
         f0_mean = 0
+        f0_std = 0
         f0_similarity = 0
         tone_stability = 0
-    
+
     # 流利度：由调用方传入（真实VAD计算）
     fluency = fluency if fluency > 0 else 50.0
-    
+
     # 发音准确度 = 音素级深度学习评分 与 基频相似度 加权
     phoneme_score = audio_analysis.phoneme_score  # 0-100，来自Wav2Vec2音素对比
     if phoneme_score > 0:
         accuracy = (phoneme_score * 0.5 + f0_similarity * 0.3 + tone_stability * 0.2)
     else:
         accuracy = (f0_similarity * 0.6 + tone_stability * 0.4)
-    
+
     # 声调评估（深度学习声调评分 + 基频稳定性）
     tone_score = audio_analysis.tone_score  # 0-100，来自F0曲线形状与识别声调
     if tone_score > 0:
         tone_combined = tone_score * 0.6 + tone_stability * 0.4
     else:
         tone_combined = tone_stability
-    
+
     pronunciation = (accuracy * 0.5 + tone_combined * 0.3 + fluency * 0.2)
     score = (accuracy * 0.35 + tone_combined * 0.25 + fluency * 0.2 + pronunciation * 0.2)
-    
-    # 生成反馈
-    feedback = []
-    
-    if tone_combined < 70:
-        feedback.append(FeedbackItem(
-            type="error",
-            category="tone",
-            message="声调偏差较大",
-            detail=f"您的平均基频为{f0_mean:.0f}Hz，标准约为{standard['f0_mean']}Hz，声调曲线与标准声调形状相关性偏低",
-            improvement="请仔细听示范音频，调整声带张力，注意声调的高低走向"
-        ))
-    elif tone_combined < 85:
-        feedback.append(FeedbackItem(
-            type="warning",
-            category="tone",
-            message="声调基本正确，有提升空间",
-            detail="声调曲线与标准有轻微偏差",
-            improvement="注意声调的起始和结束位置"
-        ))
-    else:
-        feedback.append(FeedbackItem(
-            type="suggestion",
-            category="tone",
-            message="声调表现优秀",
-            detail="声调曲线与标准高度一致",
-            improvement="继续保持！"
-        ))
-    
-    if phoneme_score > 0 and phoneme_score < 80:
-        # 音素级反馈（来自深度学习识别结果）
-        for ph in audio_analysis.phonemes[:2]:
-            if ph.score < 100:
-                feedback.append(FeedbackItem(
-                    type="error" if ph.score < 50 else "warning",
-                    category="pronunciation",
-                    message=f"{ph.phoneme}发音需改进",
-                    detail=ph.feedback,
-                    improvement="参考3D发音动画，调整舌位和口型"
-                ))
-    
-    if fluency < 70:
-        feedback.append(FeedbackItem(
-            type="warning",
-            category="fluency",
-            message="发音流畅度需要提升",
-            detail=f"检测到发音存在停顿或不连贯（流利度{fluency:.0f}分）",
-            improvement="多练习，提高发音的连贯性"
-        ))
-    
+
+    # 四步反馈（现象 → 环节 → 提示 → 练习，规则模板来自 feedback_engine）
+    quality_warn = next((i for i in quality["items"] if i["status"] == "warn"), None)
+    feedback_items = build_four_step_feedback(
+        tone_combined=tone_combined,
+        f0_mean=f0_mean,
+        f0_std=f0_std,
+        ref_f0=float(standard["f0_mean"]),
+        detected_tone=audio_analysis.detected_tone,
+        ref_tone=int(standard["tone"]),
+        fluency=fluency,
+        phonemes=[p.model_dump() for p in audio_analysis.phonemes],
+        quality_warn=quality_warn,
+    )
+
+    # 结果可靠性（RES-07）
+    voiced_ratio = len(f0_voiced) / max(len(f0_array), 1)
+    recognized = bool(audio_analysis.recognized_text)
+    hits = sum(1 for p in audio_analysis.phonemes if p.score >= 80)
+    reliability, note = compute_reliability(
+        quality_passed=quality["passed"],
+        voiced_ratio=voiced_ratio,
+        recognized=recognized,
+        phoneme_hits=hits,
+        total_targets=len(targets),
+    )
+
     return PronunciationAssessment(
         score=round(score, 1),
         accuracy=round(accuracy, 1),
         fluency=round(fluency, 1),
         pronunciation=round(pronunciation, 1),
-        feedback=feedback,
-        audio_analysis=audio_analysis
+        feedback=[FeedbackItem(**f) for f in feedback_items],
+        audio_analysis=audio_analysis,
+        quality=quality,
+        reliability=reliability,
+        reliability_note=note,
+        boundary=BOUNDARY,
     )
 
 @app.get("/")
@@ -232,21 +276,8 @@ async def root():
 
 @app.get("/api/pronunciation-units")
 async def get_pronunciation_units():
-    """获取所有发音单元"""
-    units = [
-        {"id": "ma", "pinyin": "mā", "character": "妈", "category": "声母", "order": 1},
-        {"id": "ba", "pinyin": "bā", "character": "八", "category": "声母", "order": 2},
-        {"id": "pa", "pinyin": "pā", "character": "趴", "category": "声母", "order": 3},
-        {"id": "ta", "pinyin": "tā", "character": "他", "category": "声母", "order": 4},
-        {"id": "yi", "pinyin": "yī", "character": "一", "category": "韵母", "order": 5},
-        {"id": "wu", "pinyin": "wǔ", "character": "五", "category": "韵母", "order": 6},
-        {"id": "yu", "pinyin": "yú", "character": "鱼", "category": "韵母", "order": 7},
-        {"id": "mao", "pinyin": "māo", "character": "猫", "category": "声母", "order": 8},
-        {"id": "gou", "pinyin": "gǒu", "character": "狗", "category": "声母", "order": 9},
-        {"id": "niao", "pinyin": "niǎo", "character": "鸟", "category": "声母", "order": 10},
-        {"id": "ma_t2", "pinyin": "má", "character": "麻", "category": "声调", "order": 11},
-        {"id": "ma_t3", "pinyin": "mǎ", "character": "马", "category": "声调", "order": 12},
-    ]
+    """获取已发布发音单元（数据库驱动，含 verified 分级开放标记）"""
+    units = database.get_units("published")
     return {"code": 200, "data": units}
 
 @app.post("/api/audio/analyze")
@@ -254,8 +285,18 @@ async def analyze_audio_file(
     audio: UploadFile = File(...),
     unit_id: str = Form(...)
 ):
-    """分析上传的音频文件"""
+    """分析上传的音频文件（分级开放：仅已验证核心单元可检测）"""
     try:
+        # 分级开放策略（GROW-08）：未验证单元禁止检测，杜绝未经验证的评价
+        if not unit_verified(unit_id):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "code": 400,
+                    "message": f"「{unit_id}」的检测任务尚未通过验证，暂不开放检测；请在首批核心单元中选择",
+                },
+            )
+
         # 读取音频数据
         audio_bytes = await audio.read()
         
@@ -297,6 +338,29 @@ async def analyze_audio_file(
         if wav_path != tmp_path and os.path.exists(wav_path):
             os.unlink(wav_path)
         
+        # 录音质量五维检测（RES-01）：音量/噪声/截幅/时长/静音
+        quality = analyze_audio_quality(y, sr)
+
+        # 录音不合格：停止评价，引导重录（AC-07）
+        if not quality["passed"]:
+            return {
+                "code": 200,
+                "message": quality["summary"],
+                "data": {
+                    "evaluable": False,
+                    "score": 0,
+                    "accuracy": 0,
+                    "fluency": 0,
+                    "pronunciation": 0,
+                    "feedback": [],
+                    "audio_analysis": None,
+                    "quality": quality,
+                    "reliability": "not_available",
+                    "reliability_note": "录音质量不达标，无法可靠评价。请按上方提示调整后重录。",
+                    "boundary": BOUNDARY,
+                },
+            }
+
         # 分析音频（声学特征：F0/MFCC/能量/共振峰）
         analysis = analyze_audio(y, sr)
         
@@ -308,7 +372,9 @@ async def analyze_audio_file(
         analysis.detected_tone = deep["detected_tone"]
         analysis.tone_score = deep["tone_score"]
         analysis.phoneme_score = deep["phoneme_score"]
-        analysis.phonemes = deep["phonemes"]
+        # compare_phonemes 返回 dict 列表；转成 PhonemeResult 对象，
+        # 供 assess_pronunciation 中 p.model_dump() / p.score 使用（多目标单元必现）
+        analysis.phonemes = [PhonemeResult(**p) for p in deep["phonemes"]]
         
         # 真实流利度（VAD停顿/语速分析）
         fluency = compute_fluency_score(y, sr)
@@ -319,8 +385,8 @@ async def analyze_audio_file(
             n_frames = len(analysis.f0) or 100
             analysis.standard_f0 = standard_tone_curve(ref["tone"], n_frames).tolist()
         
-        # 评估发音
-        assessment = assess_pronunciation(analysis, unit_id, fluency)
+        # 评估发音（四步反馈 + 可靠性 + 边界声明）
+        assessment = assess_pronunciation(analysis, unit_id, fluency, quality)
         
         return {
             "code": 200,
@@ -425,6 +491,183 @@ async def admin_stats():
     """后台管理：全量统计卡片数据（SQL 聚合）"""
     stats = database.get_stats()
     return {"code": 200, "data": stats}
+
+
+# ---------------------------------------------------------------------------
+# 发音单元管理（后台 CMS 落库，内容可生长 GROW-01）
+# ---------------------------------------------------------------------------
+@app.get("/api/units")
+async def get_units(status: str = ""):
+    """发音单元列表（status=published 仅返回已发布）"""
+    units = database.get_units(status)
+    return {"code": 200, "data": units}
+
+
+@app.post("/api/units")
+async def create_unit(payload: dict):
+    """新增发音单元（后台录入，字段与文档 UNIT-01~10 对齐）"""
+    try:
+        unit_id = database.create_unit(payload)
+        return {"code": 200, "message": "单元已创建", "data": {"id": unit_id}}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"code": 400, "message": f"创建失败: {str(e)}"})
+
+
+@app.put("/api/units/{unit_id}")
+async def update_unit(unit_id: str, payload: dict):
+    """更新发音单元（含状态/验证标记）"""
+    ok = database.update_unit(unit_id, payload)
+    if not ok:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "单元不存在"})
+    return {"code": 200, "message": "单元已更新"}
+
+
+@app.delete("/api/units/{unit_id}")
+async def delete_unit(unit_id: str):
+    """删除发音单元（核心单元受保护，仅允许删除扩展单元）"""
+    if unit_id in database.CORE_UNITS_IDS:
+        return JSONResponse(status_code=400, content={"code": 400, "message": "核心单元受保护，不可删除；可改为草稿状态下线"})
+    ok = database.delete_unit(unit_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "单元不存在"})
+    return {"code": 200, "message": "单元已删除"}
+
+
+# ---------------------------------------------------------------------------
+# 用户反馈闭环（FB-01~07：提交 / 后台列表 / 处理状态）
+# ---------------------------------------------------------------------------
+@app.post("/api/feedback")
+async def submit_feedback(payload: dict):
+    """用户提交反馈（看懂了吗/内容纠错/新增需求/结果反馈）"""
+    fb_id = database.create_feedback(payload)
+    return {"code": 200, "message": "感谢反馈，我们会尽快处理", "data": {"id": fb_id}}
+
+
+@app.get("/api/admin/feedback")
+async def admin_feedback(status: str = ""):
+    """后台：反馈处理列表（支持按状态过滤）"""
+    items = database.get_feedbacks(status)
+    return {"code": 200, "data": items}
+
+
+@app.put("/api/admin/feedback/{fb_id}")
+async def handle_feedback(fb_id: str, payload: dict):
+    """后台：更新反馈处理状态（pending/adopted/rejected + 处理说明）"""
+    status = payload.get("status", "pending")
+    note = payload.get("handleNote", "")
+    ok = database.update_feedback_status(fb_id, status, note)
+    if not ok:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "反馈不存在"})
+    return {"code": 200, "message": "处理状态已更新"}
+
+
+# ---------------------------------------------------------------------------
+# 收藏（发音库收藏，注册用户粒度）
+# ---------------------------------------------------------------------------
+@app.get("/api/users/{user_id}/favorites")
+async def get_favorites(user_id: str):
+    """获取用户收藏的单元 id 列表"""
+    ids = database.get_favorites(user_id)
+    return {"code": 200, "data": ids}
+
+
+@app.post("/api/users/{user_id}/favorites/{unit_id}")
+async def add_favorite(user_id: str, unit_id: str):
+    """收藏发音单元"""
+    database.add_favorite(user_id, unit_id)
+    return {"code": 200, "message": "已收藏"}
+
+
+@app.delete("/api/users/{user_id}/favorites/{unit_id}")
+async def remove_favorite(user_id: str, unit_id: str):
+    """取消收藏"""
+    database.remove_favorite(user_id, unit_id)
+    return {"code": 200, "message": "已取消收藏"}
+
+
+# ---------------------------------------------------------------------------
+# 媒体资源（后台媒体上传，文件存 uploads/ 目录，记录入 SQLite）
+# ---------------------------------------------------------------------------
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.post("/api/media/upload")
+async def upload_media(
+    file: UploadFile = File(...),
+    file_type: str = Form("audio"),
+):
+    """上传媒体文件（音频/图片），返回可访问 URL"""
+    data = await file.read()
+    ext = os.path.splitext(file.filename or "")[1] or ".bin"
+    fname = f"{uuid4().hex}{ext}"
+    fpath = os.path.join(UPLOAD_DIR, fname)
+    with open(fpath, "wb") as f:
+        f.write(data)
+    media_id = database.create_media(
+        name=file.filename or fname,
+        file_type=file_type,
+        mime=file.content_type or "application/octet-stream",
+        size=len(data),
+        path=fname,
+    )
+    return {"code": 200, "message": "上传成功", "data": {"id": media_id, "url": f"/api/media/{media_id}/file"}}
+
+
+@app.get("/api/media")
+async def list_media():
+    """媒体资源列表"""
+    items = database.get_media_list()
+    for it in items:
+        it["url"] = f"/api/media/{it['id']}/file"
+    return {"code": 200, "data": items}
+
+
+@app.get("/api/media/{media_id}/file")
+async def get_media_file(media_id: str):
+    """访问媒体文件内容"""
+    media = database.get_media(media_id)
+    if media is None:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "媒体不存在"})
+    fpath = os.path.join(UPLOAD_DIR, media["path"])
+    if not os.path.exists(fpath):
+        return JSONResponse(status_code=404, content={"code": 404, "message": "媒体文件缺失"})
+    with open(fpath, "rb") as f:
+        content = f.read()
+    return Response(content=content, media_type=media["mime"])
+
+
+@app.delete("/api/media/{media_id}")
+async def delete_media(media_id: str):
+    """删除媒体资源（同时删除磁盘文件）"""
+    media = database.get_media(media_id)
+    if media is None:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "媒体不存在"})
+    fpath = os.path.join(UPLOAD_DIR, media["path"])
+    if os.path.exists(fpath):
+        os.unlink(fpath)
+    database.delete_media(media_id)
+    return {"code": 200, "message": "媒体已删除"}
+
+
+# ---------------------------------------------------------------------------
+# 学习记录删除（声音档案：用户对自己数据的控制权 ARC-03/06）
+# ---------------------------------------------------------------------------
+@app.delete("/api/learning-records/{record_id}")
+async def delete_learning_record(record_id: str):
+    """删除单条学习记录（默认校验 default_user 归属）"""
+    ok = database.delete_learning_record(record_id, user_id="default_user")
+    if not ok:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "记录不存在或无权限"})
+    return {"code": 200, "message": "记录已删除"}
+
+
+@app.delete("/api/users/{user_id}/learning-records")
+async def delete_all_learning_records(user_id: str):
+    """清空用户全部学习记录（声音档案清空）"""
+    count = database.delete_all_learning_records(user_id)
+    return {"code": 200, "message": f"已删除 {count} 条记录", "data": {"deleted": count}}
+
 
 @app.websocket("/ws/audio-stream")
 async def audio_stream_websocket(websocket: WebSocket):
