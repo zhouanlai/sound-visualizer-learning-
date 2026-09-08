@@ -8,6 +8,8 @@ import type {
   PaginatedResponse,
   SearchParams,
   MediaAsset,
+  CmsUnit,
+  UserFeedbackItem,
 } from '@/types'
 
 // API基础配置
@@ -129,6 +131,14 @@ export const learningRecordApi = {
     const blob = await response.blob()
     return URL.createObjectURL(blob)
   },
+
+  delete(id: string): Promise<ApiResponse<void>> {
+    return request(`/learning-records/${id}`, { method: 'DELETE' })
+  },
+
+  deleteAll(userId: string): Promise<ApiResponse<{ deleted: number }>> {
+    return request(`/users/${userId}/learning-records`, { method: 'DELETE' })
+  },
 }
 
 // 用户进度API
@@ -149,14 +159,77 @@ export const userProgressApi = {
 
 // 后台管理API
 export const adminApi = {
-  // 全部用户的学习记录（后台数据统计页）
   getAllLearningRecords(limit = 100): Promise<ApiResponse<LearningRecord[]>> {
     return request(`/admin/learning-records?limit=${limit}`)
   },
 
-  // 全量统计卡片数据
   getStats(): Promise<ApiResponse<AdminStats>> {
     return request('/admin/stats')
+  },
+
+  getFeedbacks(status = ''): Promise<ApiResponse<UserFeedbackItem[]>> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : ''
+    return request(`/admin/feedback${q}`)
+  },
+
+  updateFeedback(id: string, status: string, handleNote: string): Promise<ApiResponse<void>> {
+    return request(`/admin/feedback/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status, handleNote }),
+    })
+  },
+}
+
+// CMS 发音单元
+export const unitsApi = {
+  list(status = ''): Promise<ApiResponse<CmsUnit[]>> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : ''
+    return request(`/units${q}`)
+  },
+
+  getById(id: string): Promise<ApiResponse<CmsUnit>> {
+    return request(`/units/${id}`)
+  },
+
+  create(data: Partial<CmsUnit>): Promise<ApiResponse<{ id: string }>> {
+    return request('/units', { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  update(id: string, data: Partial<CmsUnit>): Promise<ApiResponse<void>> {
+    return request(`/units/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  delete(id: string): Promise<ApiResponse<void>> {
+    return request(`/units/${id}`, { method: 'DELETE' })
+  },
+}
+
+// 用户反馈
+export const feedbackApi = {
+  submit(payload: {
+    userId: string
+    type: string
+    page: string
+    unitId?: string
+    rating?: string
+    message?: string
+  }): Promise<ApiResponse<{ id: string }>> {
+    return request('/feedback', { method: 'POST', body: JSON.stringify(payload) })
+  },
+}
+
+// 收藏
+export const favoritesApi = {
+  list(userId: string): Promise<ApiResponse<string[]>> {
+    return request(`/users/${userId}/favorites`)
+  },
+
+  add(userId: string, unitId: string): Promise<ApiResponse<void>> {
+    return request(`/users/${userId}/favorites/${unitId}`, { method: 'POST' })
+  },
+
+  remove(userId: string, unitId: string): Promise<ApiResponse<void>> {
+    return request(`/users/${userId}/favorites/${unitId}`, { method: 'DELETE' })
   },
 }
 
@@ -193,7 +266,7 @@ export const mediaApi = {
   upload(file: File, type: string): Promise<ApiResponse<MediaAsset>> {
     const formData = new FormData()
     formData.append('file', file)
-    formData.append('type', type)
+    formData.append('file_type', type)
 
     return request('/media/upload', {
       method: 'POST',

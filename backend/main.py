@@ -503,6 +503,15 @@ async def get_units(status: str = ""):
     return {"code": 200, "data": units}
 
 
+@app.get("/api/units/{unit_id}")
+async def get_unit(unit_id: str):
+    """获取单个发音单元详情"""
+    unit = database.get_unit(unit_id)
+    if unit is None:
+        return JSONResponse(status_code=404, content={"code": 404, "message": "单元不存在"})
+    return {"code": 200, "data": unit}
+
+
 @app.post("/api/units")
 async def create_unit(payload: dict):
     """新增发音单元（后台录入，字段与文档 UNIT-01~10 对齐）"""

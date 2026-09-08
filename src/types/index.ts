@@ -89,23 +89,82 @@ export interface AudioAnalysisResult {
   standardF0: number[] // 标准声调曲线（后端生成）
 }
 
-// 发音评估结果类型
-export interface PronunciationAssessment {
-  score: number // 综合评分 (0-100)
-  accuracy: number // 准确度 (0-100)
-  fluency: number // 流利度 (0-100)
-  pronunciation: number // 发音 (0-100)
-  feedback: FeedbackItem[] // 反馈建议
-  audioAnalysis: AudioAnalysisResult // 音频分析结果
+export interface QualityItem {
+  key: string
+  label: string
+  status: 'ok' | 'warn' | 'fail'
+  message: string
 }
 
-// 反馈项类型
+export interface RecordingQuality {
+  passed: boolean
+  summary: string
+  items: QualityItem[]
+}
+
+export interface ResultBoundary {
+  statement: string
+  scope?: string
+  factors?: string[]
+}
+
+// 发音评估结果类型
+export interface PronunciationAssessment {
+  score: number
+  accuracy: number
+  fluency: number
+  pronunciation: number
+  feedback: FeedbackItem[]
+  audioAnalysis: AudioAnalysisResult | null
+  evaluable: boolean
+  quality: RecordingQuality
+  reliability: 'reliable' | 'reference_only' | 'not_available'
+  reliabilityNote: string
+  boundary: ResultBoundary
+  /** 一句话结论（当前任务最重要的一项） */
+  headline?: string
+}
+
+// 反馈项类型（四步反馈 RES-05）
 export interface FeedbackItem {
   type: 'error' | 'warning' | 'suggestion'
-  category: 'tone' | 'pronunciation' | 'fluency' | 'rhythm'
+  category: 'tone' | 'pronunciation' | 'fluency' | 'rhythm' | 'quality'
+  phenomenon: string
+  link: string
+  hint: string
+  practice: string
   message: string
   detail: string
   improvement: string
+}
+
+export interface CmsUnit {
+  id: string
+  pinyin: string
+  character: string
+  category: string
+  description: string
+  conclusion: string
+  detail: string
+  mistakes: Array<Record<string, string>>
+  steps: Array<Record<string, string>>
+  related: string[]
+  status: 'draft' | 'published'
+  verified: boolean
+  order: number
+}
+
+export interface UserFeedbackItem {
+  id: string
+  userId: string
+  type: string
+  page: string
+  unitId: string
+  rating: string
+  message: string
+  status: 'pending' | 'adopted' | 'rejected'
+  handleNote: string
+  createdAt: string
 }
 
 // 3D模型数据类型

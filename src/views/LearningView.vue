@@ -1,92 +1,60 @@
 <script setup lang="ts">
-import { ref, onUnmounted, computed } from 'vue'
+import { ref, onUnmounted, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useRecordingStore } from '@/stores/recording'
 import { useUserStore } from '@/stores/user'
-import { getUnitMeta, isVerifiedUnit, getVerifiedUnitMeta, VERIFIED_UNIT_IDS } from '@/data/pinyinUnits'
+import { useUnitsStore } from '@/stores/units'
+import { useArchiveConsent } from '@/composables/useArchiveConsent'
+import { useSpeechDemo } from '@/composables/useSpeechDemo'
+import PageFeedback from '@/components/PageFeedback.vue'
+import { UNIT_SEARCH_META } from '@/data/unitSearchMeta'
+import type { PublishedUnit } from '@/data/coreUnits'
 
 const route = useRoute()
 const router = useRouter()
 const recordingStore = useRecordingStore()
 const userStore = useUserStore()
-
-const unitData: Record<string, any> = {
-  ma: { pinyin: 'mā', character: '妈', tone: 1, desc: '双唇鼻音，第一声（阴平）', detail: '双唇紧闭，软腭下降，打开鼻腔通路，声带振动。声调保持高平。' },
-  ba: { pinyin: 'bā', character: '八', tone: 1, desc: '双唇清塞音，第一声', detail: '双唇紧闭，然后突然打开，气流冲出。不送气。' },
-  pa: { pinyin: 'pā', character: '趴', tone: 1, desc: '双唇清塞音，第一声', detail: '双唇紧闭，然后突然打开，气流冲出。送气。' },
-  ta: { pinyin: 'tā', character: '他', tone: 1, desc: '舌尖中清塞音，第一声', detail: '舌尖抵住上齿龈，然后突然放开。' },
-  yi: { pinyin: 'yī', character: '一', tone: 1, desc: '齐齿呼，第一声', detail: '口微开，上下齿对齐，舌面前部接近硬腭。' },
-  wu: { pinyin: 'wǔ', character: '五', tone: 3, desc: '合口呼，第三声', detail: '双唇拢圆，舌面后部隆起。声调先降后升。' },
-  yu: { pinyin: 'yú', character: '鱼', tone: 2, desc: '撮口呼，第二声', detail: '双唇拢圆，舌面前部接近硬腭。声调上升。' },
-  mao: { pinyin: 'māo', character: '猫', tone: 1, desc: '双唇鼻音+复韵母', detail: '先发m音，然后滑向ao。' },
-  gou: { pinyin: 'gǒu', character: '狗', tone: 3, desc: '舌根音+复韵母', detail: '舌根抵住软腭，然后放开，滑向ou。' },
-  niao: { pinyin: 'niǎo', character: '鸟', tone: 3, desc: '舌尖中音+复韵母', detail: '舌尖抵住上齿龈，鼻音，滑向iao。' },
-  ma_t2: { pinyin: 'má', character: '麻', tone: 2, desc: '双唇鼻音，第二声（阳平）', detail: '声调从中音升到高音。' },
-  ma_t3: { pinyin: 'mǎ', character: '马', tone: 3, desc: '双唇鼻音，第三声（上声）', detail: '声调先降后升。' },
-}
+const unitsStore = useUnitsStore()
+const { consented } = useArchiveConsent()
+const speech = useSpeechDemo()
+const playingNormal = computed(() => speech.isPlaying.value && speech.mode.value === 'normal')
+const playingSlow = computed(() => speech.isPlaying.value && speech.mode.value === 'slow')
 
 const unitId = computed(() => route.params.id as string)
-// 是否已通过验证、开放 AI 检测的核心单元（与后端 GROW-08 分级开放策略一致）
-const isVerified = computed(() => isVerifiedUnit(unitId.value))
-const verifiedMeta = computed(() => getVerifiedUnitMeta(unitId.value))
-// 优先取手工教学数据；未收录的拼音单元（发音库/地图全量单元）自动从共享数据兜底
-const unit = computed(() => {
-  const known = unitData[unitId.value]
-  if (known) {
-    // 核心对比单元使用验证清单中的展示拼音（如 u_u → u/ü，ma_tone → mā/má/mǎ/mà）
-    return { ...known, pinyin: verifiedMeta.value?.pinyin ?? known.pinyin }
-  }
-  const meta = getUnitMeta(unitId.value)
-  if (meta) {
-    return {
-      pinyin: verifiedMeta.value?.pinyin ?? meta.tone,
-      character: meta.char,
-      tone: 1,
-      desc: `${unitId.value} 发音练习`,
-      detail: '点击「播放示范」听标准发音，然后按下录音按钮练习。对照反馈页的评分与可视化结果不断改进。',
-    }
-  }
-  // 核心对比单元（如 b_p、d_t）不在拼音全量表中，从验证清单兜底
-  if (verifiedMeta.value) {
-    return {
-      pinyin: verifiedMeta.value.pinyin,
-      character: verifiedMeta.value.char,
-      tone: 1,
-      desc: `${verifiedMeta.value.desc}（核心对比单元）`,
-      detail: '对比单元需分别朗读多个目标音节，注意区分发音部位与送气/不送气、鼻音/边音等特征。',
-    }
-  }
-  return unitData.ma
-})
-const isPlaying = ref(false)
+const unit = ref<PublishedUnit | null>(null)
 const canvasRef = ref<HTMLCanvasElement | null>(null)
-const pitchHistory = ref<number[]>([])
 let animationFrame: number | null = null
 
-function playDemo() {
-  if (!('speechSynthesis' in window)) {
-    alert('您的浏览器不支持语音合成功能')
-    return
+const isVerified = computed(() => !!unit.value?.verified)
+const unitMeta = computed(() => (unitId.value ? UNIT_SEARCH_META[unitId.value] : undefined))
+const practiceSteps = computed(() => {
+  const steps = unit.value?.steps || []
+  if (steps.length) return steps
+  return [
+    { title: '听示范', text: '先听 3 遍正常与慢速示范，注意口型与声调走向。' },
+    { title: '跟读', text: '不录音，先跟读 5 遍，感受发音部位。' },
+    { title: '录音', text: '按下录音键，清晰朗读目标音节。' },
+    { title: '看结果', text: '提交后查看现象、可能环节与短练习建议。' },
+    { title: '再录', text: '按建议调整后重录，比较前后差异。' },
+  ]
+})
+
+onMounted(async () => {
+  unit.value = await unitsStore.getUnit(unitId.value)
+})
+
+watch(unitId, async (id) => {
+  unit.value = await unitsStore.getUnit(id)
+})
+
+async function playDemo(speed: 'normal' | 'slow') {
+  if (!unit.value) return
+  try {
+    await speech.speak(unit.value.character, speed)
+  } catch {
+    ElMessage.error('播放失败')
   }
-  isPlaying.value = true
-  // 取消之前的语音
-  speechSynthesis.cancel()
-  
-  const utterance = new SpeechSynthesisUtterance(unit.value.character)
-  utterance.lang = 'zh-CN'
-  utterance.rate = 0.8 // 稍慢，方便学习
-  utterance.pitch = 1.0
-  utterance.volume = 1.0
-  
-  // 尝试选择中文语音
-  const voices = speechSynthesis.getVoices()
-  const zhVoice = voices.find(v => v.lang.startsWith('zh'))
-  if (zhVoice) utterance.voice = zhVoice
-  
-  utterance.onend = () => { isPlaying.value = false }
-  utterance.onerror = () => { isPlaying.value = false }
-  speechSynthesis.speak(utterance)
 }
 
 async function startRecording() {
@@ -113,14 +81,17 @@ function startVisualization() {
     safeAnalyser.getByteTimeDomainData(data)
     ctx!.fillStyle = '#1a1a2e'
     ctx!.fillRect(0, 0, canvas.width, canvas.height)
-    ctx!.lineWidth = 2; ctx!.strokeStyle = '#409eff'; ctx!.beginPath()
-    const sw = canvas.width / bufLen; let x = 0
+    ctx!.lineWidth = 2
+    ctx!.strokeStyle = '#409eff'
+    ctx!.beginPath()
+    const sw = canvas.width / bufLen
+    let x = 0
     for (let i = 0; i < bufLen; i++) {
       const y = ((data[i] ?? 128) / 128.0) * canvas.height / 2
       i === 0 ? ctx!.moveTo(x, y) : ctx!.lineTo(x, y)
       x += sw
     }
-    ctx!.lineTo(canvas.width, canvas.height / 2); ctx!.stroke()
+    ctx!.stroke()
   }
   draw()
 }
@@ -133,145 +104,126 @@ async function analyzeAndGoFeedback() {
   stopRecording()
   await recordingStore.analyzeRecording(unitId.value)
   const assessment = recordingStore.assessment
-  // 自动保存：录音二进制 + 评估结果一并写入数据库，并联动更新学习进度/记录
-  try {
-    await userStore.addLearningRecord({
-      unitId: unitId.value,
-      pinyin: unit.value.pinyin,
-      character: unit.value.character,
-      score: assessment?.score || 0,
-      accuracy: assessment?.accuracy || 0,
-      fluency: assessment?.fluency || 0,
-      pronunciation: assessment?.pronunciation || 0,
-      duration: recordingStore.duration,
-      feedback: assessment?.feedback.map(f => f.message).join('; ') || '',
-      audioBlob: recordingStore.recordingState.audioBlob ?? new Blob(),
-    })
-  } catch (err) {
-    // 保存失败不阻塞反馈展示，但明确提示
-    ElMessage.error('学习记录保存失败，请确认后端服务已启动')
+  if (consented.value && assessment?.evaluable) {
+    try {
+      await userStore.addLearningRecord({
+        unitId: unitId.value,
+        pinyin: unit.value?.pinyin || '',
+        character: unit.value?.character || '',
+        score: assessment.score,
+        accuracy: assessment.accuracy,
+        fluency: assessment.fluency,
+        pronunciation: assessment.pronunciation,
+        duration: recordingStore.duration,
+        feedback: assessment.feedback.map(f => f.phenomenon).join('; '),
+        audioBlob: recordingStore.recordingState.audioBlob ?? new Blob(),
+      })
+    } catch {
+      ElMessage.warning('未保存到档案（需同意保存或后端未启动）')
+    }
   }
   router.push(`/feedback/${unitId.value}`)
 }
 
-onUnmounted(() => { stopVisualization() })
+onUnmounted(() => stopVisualization())
 </script>
 
 <template>
-  <div class="learning-view">
-    <!-- 顶部：发音教学区 -->
-    <div class="teaching-section">
-      <div class="unit-info">
-        <div class="unit-character">{{ unit.character }}</div>
-        <div class="unit-pinyin">
-          {{ unit.pinyin }}
-          <el-tag v-if="isVerified" type="success" size="small" effect="light" class="verify-tag">可检测</el-tag>
-          <el-tag v-else type="info" size="small" effect="light" class="verify-tag">仅学习</el-tag>
-        </div>
-        <div class="unit-desc">{{ unit.desc }}</div>
-        <p class="unit-detail">{{ unit.detail }}</p>
-      </div>
-      <div class="teaching-actions">
-        <el-button type="primary" :icon="'VideoPlay'" @click="playDemo" :loading="isPlaying">
-          {{ isPlaying ? '播放中...' : '播放示范' }}
-        </el-button>
-        <el-button :icon="'VideoPause'">慢速播放</el-button>
-      </div>
-    </div>
+  <div class="learning-view" v-if="unit">
+    <section class="conclusion card">
+      <p class="label">一句话结论</p>
+      <h2>{{ unit.conclusion }}</h2>
+    </section>
 
-    <!-- 中部：录音练习区 -->
-    <div class="recording-section">
-      <h3>录音练习</h3>
-      <template v-if="isVerified">
-        <div class="recording-controls">
-          <el-button
-            v-if="!recordingStore.isRecording"
-            type="danger"
-            :icon="'Microphone'"
-            size="large"
-            circle
-            @click="startRecording"
-            class="record-btn"
-          />
-          <el-button
-            v-else
-            type="info"
-            :icon="'VideoPause'"
-            size="large"
-            circle
-            @click="stopRecording"
-            class="record-btn recording"
-          />
-          <span class="record-time">{{ recordingStore.formattedDuration }}</span>
+    <section class="card grid-2">
+      <div>
+        <div class="char">{{ unit.character }}</div>
+        <div class="py">{{ unit.pinyin }}</div>
+        <p>{{ unit.detail }}</p>
+        <div class="articulation">
+          <strong>看得见的构形（示意）</strong>
+          <p>关注唇形、舌位与下颌开合。详细 3D 剖面见检测结果页。</p>
         </div>
-        <canvas ref="canvasRef" width="600" height="120" class="waveform-canvas"></canvas>
-        <div v-if="recordingStore.hasRecording" class="record-actions">
-          <el-button :icon="'Refresh'" @click="recordingStore.clearRecording">重录</el-button>
-          <el-button type="primary" :icon="'DataAnalysis'" @click="analyzeAndGoFeedback" :loading="recordingStore.isAnalyzing">
-            {{ recordingStore.isAnalyzing ? '分析中...' : '分析发音' }}
-          </el-button>
+      </div>
+      <div class="demo">
+        <strong>听得见的声音</strong>
+        <div class="demo-btns">
+          <el-button type="primary" :loading="playingNormal" @click="playDemo('normal')">正常示范</el-button>
+          <el-button :loading="playingSlow" @click="playDemo('slow')">慢速示范</el-button>
         </div>
-      </template>
-      <template v-else>
-        <div class="verify-hint">
-          <el-icon color="#e6a23c" :size="20"><Warning /></el-icon>
-          <div class="verify-hint-text">
-            <strong>该单元暂未开放 AI 检测</strong>
-            <p>当前仅开放 12 个核心对比单元的录音分析（附录 A）。本单元可播放示范跟读，如需获得评分与纠音反馈，请前往核心单元练习。</p>
-          </div>
-          <el-button type="primary" size="small" @click="router.push('/library')">去核心单元</el-button>
-        </div>
-      </template>
-    </div>
+        <p class="tts-note">{{ speech.disclaimer }}</p>
+        <p class="ipa">代表材料：拼音 {{ unit.pinyin }} · IPA {{ unitMeta?.ipa || '—' }} · 类别 {{ unit.category }}</p>
+        <el-collapse v-if="unitMeta?.professional?.length" class="pro-block">
+          <el-collapse-item title="专业资料（按需展开）" name="pro">
+            <ul>
+              <li v-for="t in unitMeta.professional" :key="t.term"><strong>{{ t.term }}</strong>：{{ t.explain }}</li>
+            </ul>
+            <el-button link type="primary" @click="router.push('/materials')">查看更多专业资料</el-button>
+            <p class="boundary">资料仅用于理解发音，不构成医学诊断依据。</p>
+          </el-collapse-item>
+        </el-collapse>
+      </div>
+    </section>
 
-    <!-- 底部：常见误区 -->
-    <div class="mistakes-section">
+    <section class="card">
+      <h3>跟着练（{{ practiceSteps.length }} 步）</h3>
+      <ol>
+        <li v-for="(s, i) in practiceSteps" :key="i">
+          <strong>{{ s.title || `步骤 ${i + 1}` }}</strong> — {{ s.text || s }}
+        </li>
+      </ol>
+    </section>
+
+    <section class="card" v-if="unit.mistakes?.length">
       <h3>常见误区</h3>
-      <div class="mistake-list">
-        <div class="mistake-item" v-if="unitId === 'ma'">
-          <el-icon color="#e6a23c"><Warning /></el-icon>
-          <div><strong>声调不够高平</strong><p>保持声带张力稳定，不要在结尾下掉。</p></div>
-        </div>
-        <div class="mistake-item" v-if="unitId === 'ba'">
-          <el-icon color="#e6a23c"><Warning /></el-icon>
-          <div><strong>送气与不送气混淆</strong><p>b是不送气音，p是送气音。把手放在嘴前感受气流。</p></div>
-        </div>
-        <div class="mistake-item">
-          <el-icon color="#409eff"><InfoFilled /></el-icon>
-          <div><strong>练习建议</strong><p>先听示范3-5次，再尝试录音。录完后对比分析结果。</p></div>
-        </div>
+      <div v-for="(m, i) in unit.mistakes" :key="i" class="mistake">{{ m.title || m.phenomenon }}：{{ m.text || m.hint }}</div>
+    </section>
+
+    <section class="card record" v-if="isVerified">
+      <h3>录音比较</h3>
+      <p>该任务已通过验证，可提交 AI 检测。</p>
+      <div class="record-row">
+        <el-button v-if="!recordingStore.isRecording" type="danger" circle size="large" @click="startRecording" />
+        <el-button v-else type="info" circle size="large" @click="stopRecording" />
+        <span>{{ recordingStore.formattedDuration }}</span>
       </div>
-    </div>
+      <canvas ref="canvasRef" width="600" height="100" class="wave" />
+      <div v-if="recordingStore.hasRecording" class="record-actions">
+        <el-button @click="recordingStore.clearRecording">重录</el-button>
+        <el-button type="primary" :loading="recordingStore.isAnalyzing" @click="analyzeAndGoFeedback">提交分析</el-button>
+      </div>
+      <p v-if="!consented" class="consent-hint">未同意保存时，录音仅用于本次分析，不会写入档案。</p>
+    </section>
+    <section class="card" v-else>
+      <el-alert type="info" title="该单元检测尚未开放" description="可先学习跟读；开放检测的核心单元请从发音库进入。" show-icon :closable="false" />
+    </section>
+
+    <section class="card" v-if="unit.related?.length">
+      <h3>相关学习</h3>
+      <el-button v-for="rid in unit.related" :key="rid" link type="primary" @click="router.push(`/learn/${rid}`)">
+        {{ unitsStore.unitLabel(rid) }}
+      </el-button>
+    </section>
+
+    <PageFeedback :page="`learn/${unitId}`" :unit-id="unitId" type="learning" />
   </div>
+  <el-empty v-else description="单元加载中或不存在" />
 </template>
 
 <style scoped>
-.learning-view { display: flex; flex-direction: column; gap: 20px; }
-.teaching-section { background: white; border-radius: 12px; padding: 24px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
-.unit-info { flex: 1; }
-.unit-character { font-size: 72px; font-weight: 700; color: #303133; line-height: 1; }
-.unit-pinyin { font-size: 28px; color: #409eff; margin: 8px 0; display: flex; align-items: center; gap: 10px; }
-.verify-tag { flex-shrink: 0; }
-.unit-desc { font-size: 14px; color: #909399; }
-.unit-detail { font-size: 14px; color: #606266; margin-top: 8px; line-height: 1.6; }
-.teaching-actions { display: flex; flex-direction: column; gap: 8px; }
-.recording-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); text-align: center; }
-.recording-section h3 { margin: 0 0 16px; font-size: 16px; color: #303133; }
-.verify-hint { display: flex; align-items: center; gap: 12px; text-align: left; padding: 16px; background: #fdf6ec; border: 1px solid #faecd8; border-radius: 8px; }
-.verify-hint-text { flex: 1; }
-.verify-hint-text strong { color: #b88230; }
-.verify-hint-text p { margin: 4px 0 0; color: #8a6d3b; font-size: 13px; line-height: 1.6; }
-.recording-controls { display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 16px; }
-.record-btn { width: 64px; height: 64px; font-size: 24px; }
-.record-btn.recording { animation: pulse 1s infinite; }
-@keyframes pulse { 0%{transform:scale(1)} 50%{transform:scale(1.1)} 100%{transform:scale(1)} }
-.record-time { font-size: 24px; font-weight: 600; color: #303133; font-variant-numeric: tabular-nums; }
-.waveform-canvas { width: 100%; height: 120px; border-radius: 8px; background: #1a1a2e; }
-.record-actions { margin-top: 16px; display: flex; justify-content: center; gap: 12px; }
-.mistakes-section { background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
-.mistakes-section h3 { margin: 0 0 16px; font-size: 16px; color: #303133; }
-.mistake-list { display: flex; flex-direction: column; gap: 12px; }
-.mistake-item { display: flex; gap: 12px; align-items: flex-start; padding: 12px; background: #f5f7fa; border-radius: 8px; }
-.mistake-item strong { color: #303133; }
-.mistake-item p { margin: 4px 0 0; color: #606266; font-size: 13px; }
+.learning-view { display: flex; flex-direction: column; gap: 16px; max-width: 900px; margin: 0 auto; }
+.card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.conclusion .label { font-size: 13px; color: #909399; margin: 0; }
+.conclusion h2 { margin: 8px 0 0; font-size: 20px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.char { font-size: 64px; font-weight: 700; }
+.py { font-size: 24px; color: #409eff; margin-bottom: 8px; }
+.demo-btns { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.tts-note, .consent-hint, .ipa, .boundary { font-size: 12px; color: #909399; }
+.pro-block { margin-top: 12px; }
+.record-row { display: flex; align-items: center; gap: 12px; margin: 12px 0; }
+.wave { width: 100%; border-radius: 8px; background: #1a1a2e; }
+.record-actions { display: flex; gap: 8px; margin-top: 12px; }
+.mistake { padding: 8px 0; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+@media (max-width: 768px) { .grid-2 { grid-template-columns: 1fr; } }
 </style>

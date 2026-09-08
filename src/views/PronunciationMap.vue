@@ -1,314 +1,237 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { PINYIN_UNITS } from '@/data/pinyinUnits'
+import { useUnitsStore } from '@/stores/units'
+import { useSpeechDemo } from '@/composables/useSpeechDemo'
+import { buildMapNodes, LAYER_LABELS, LAYER_ORDER, type MapNode, type MapLayer } from '@/data/mapNodes'
+import { PLACE_FILTERS, METHOD_FILTERS } from '@/data/unitSearchMeta'
+import PageFeedback from '@/components/PageFeedback.vue'
 
 const router = useRouter()
-const searchQuery = ref('')
+const unitsStore = useUnitsStore()
+const speech = useSpeechDemo()
 
-// 声母表
-const initials = ['b', 'p', 'm', 'f', 'd', 't', 'n', 'l', 'g', 'k', 'h', 'j', 'q', 'x', 'zh', 'ch', 'sh', 'r', 'z', 'c', 's', 'y', 'w']
+const selectedNode = ref<MapNode | null>(null)
+const drawerOpen = computed({
+  get: () => selectedNode.value !== null,
+  set: (open: boolean) => { if (!open) selectedNode.value = null },
+})
+const activeLayer = ref<MapLayer | 'all'>('all')
+const filterPlace = ref('')
+const filterMethod = ref('')
+const filterAspiration = ref('')
+const filterNasal = ref('')
+const filterTone = ref('')
+const proExpanded = ref<string[]>([])
 
-// 韵母表
-const finals = [
-  'a', 'o', 'e', 'i', 'u', 'ü',
-  'ai', 'ei', 'ao', 'ou',
-  'an', 'en', 'ang', 'eng', 'ong',
-  'ia', 'ie', 'iao', 'iou', 'ian', 'in', 'iang', 'ing', 'iong',
-  'ua', 'uo', 'uai', 'uei', 'uan', 'uen', 'uang', 'ueng',
-  'üe', 'üan', 'ün',
-  'er'
-]
+onMounted(() => unitsStore.fetchPublished())
 
-// 声调
-const tones = [
-  { mark: 'ˉ', name: '第一声（阴平）', color: '#e74c3c' },
-  { mark: 'ˊ', name: '第二声（阳平）', color: '#e67e22' },
-  { mark: 'ˇ', name: '第三声（上声）', color: '#2ecc71' },
-  { mark: 'ˋ', name: '第四声（去声）', color: '#3498db' },
-]
+const allNodes = computed(() => buildMapNodes(unitsStore.coreUnits))
 
-// 可学习单元：由共享拼音数据派生（key = 声母+韵母，value = 代表汉字）
-const availableUnits: Record<string, string> = Object.fromEntries(
-  Object.entries(PINYIN_UNITS).map(([k, v]) => [k, v.char])
-)
+const filteredNodes = computed(() => {
+  return allNodes.value.filter(n => {
+    if (activeLayer.value !== 'all' && n.layer !== activeLayer.value) return false
+    if (filterPlace.value && !n.meta.place.includes(filterPlace.value)) return false
+    if (filterMethod.value && !n.meta.method.includes(filterMethod.value)) return false
+    if (filterAspiration.value && n.meta.aspiration !== filterAspiration.value) return false
+    if (filterNasal.value === '鼻音' && !n.meta.nasal) return false
+    if (filterNasal.value === '口音' && n.meta.nasal) return false
+    if (filterTone.value && n.meta.tone !== filterTone.value && n.layer !== 'tone') return false
+    return true
+  })
+})
 
-// 可学习单元总数（自动统计）
-const availableCount = Object.keys(availableUnits).length
-
-function isAvailable(initial: string, finalChar: string): boolean {
-  return `${initial}${finalChar}` in availableUnits
-}
-
-function getCharacter(initial: string, finalChar: string): string {
-  return availableUnits[`${initial}${finalChar}`] || ''
-}
-
-function handleClick(initial: string, finalChar: string) {
-  const key = `${initial}${finalChar}`
-  if (isAvailable(initial, finalChar)) {
-    router.push(`/learn/${key}`)
+const nodesByLayer = computed(() => {
+  const map = new Map<MapLayer, MapNode[]>()
+  for (const layer of LAYER_ORDER) map.set(layer, [])
+  for (const n of filteredNodes.value) {
+    map.get(n.layer)?.push(n)
   }
+  return map
+})
+
+const similarNodes = computed(() => {
+  if (!selectedNode.value) return []
+  return selectedNode.value.meta.similar
+    .map(id => allNodes.value.find(n => n.id === id))
+    .filter(Boolean) as MapNode[]
+})
+
+function selectNode(node: MapNode) {
+  selectedNode.value = node
+  proExpanded.value = []
 }
 
-const filteredInitials = computed(() => {
-  if (!searchQuery.value) return initials
-  return initials.filter(i => i.includes(searchQuery.value.toLowerCase()))
-})
+function clearFilters() {
+  filterPlace.value = ''
+  filterMethod.value = ''
+  filterAspiration.value = ''
+  filterNasal.value = ''
+  filterTone.value = ''
+  activeLayer.value = 'all'
+}
 
-const filteredFinals = computed(() => {
-  if (!searchQuery.value) return finals
-  return finals.filter(f => f.includes(searchQuery.value.toLowerCase()))
-})
+async function playDemo(char: string) {
+  const text = char.split('/')[0] || char
+  await speech.speak(text, 'normal')
+}
 </script>
 
 <template>
   <div class="pronunciation-map">
-    <div class="map-header">
+    <header class="map-header">
       <h3>发音地图</h3>
-      <p>点击可学习的拼音单元开始练习（共 {{ availableCount }} 个发音单元）</p>
-      <el-input
-        v-model="searchQuery"
-        placeholder="搜索拼音..."
-        prefix-icon="Search"
-        style="width: 300px; margin-top: 12px"
-        clearable
-      />
-    </div>
+      <p>看清声母、韵母、声调、音节与汉字之间的关系；点击节点查看详情并进入学习。</p>
+    </header>
 
-    <!-- 图例 -->
-    <div class="legend">
-      <span class="legend-item"><span class="dot available"></span> 可学习</span>
-      <span class="legend-item"><span class="dot locked"></span> 未开放</span>
-      <span class="legend-item legend-note">* AI 录音检测当前已开放 50 个核心单元（详见发音库「核心对比」卡片）</span>
-    </div>
+    <!-- MAP-01 总览：声母→韵母→声调→音节→汉字 -->
+    <section class="overview card">
+      <h4>发音层级关系</h4>
+      <div class="flow-chain">
+        <template v-for="(layer, idx) in LAYER_ORDER" :key="layer">
+          <button
+            class="flow-node"
+            :class="{ active: activeLayer === layer }"
+            @click="activeLayer = activeLayer === layer ? 'all' : layer"
+          >
+            <span class="flow-label">{{ LAYER_LABELS[layer] }}</span>
+            <span class="flow-count">{{ nodesByLayer.get(layer)?.length || 0 }} 项</span>
+          </button>
+          <span v-if="idx < LAYER_ORDER.length - 1" class="flow-arrow">→</span>
+        </template>
+      </div>
+      <p class="flow-hint">声母与韵母组合成音节，叠加声调后对应汉字；「妈」单元覆盖完整闭环。</p>
+    </section>
 
-    <!-- 声调说明 -->
-    <div class="tone-legend">
-      <h4>声调说明</h4>
-      <div class="tone-items">
-        <div v-for="(tone, idx) in tones" :key="idx" class="tone-item">
-          <span class="tone-mark" :style="{ color: tone.color }">{{ tone.mark }}</span>
-          <span>{{ tone.name }}</span>
+    <!-- MAP-02 分类筛选 -->
+    <section class="filters card">
+      <h4>分类筛选</h4>
+      <div class="filter-row">
+        <el-select v-model="filterPlace" placeholder="发音部位" clearable style="width: 140px">
+          <el-option v-for="p in PLACE_FILTERS" :key="p" :label="p" :value="p" />
+        </el-select>
+        <el-select v-model="filterMethod" placeholder="发音方法" clearable style="width: 140px">
+          <el-option v-for="m in METHOD_FILTERS" :key="m" :label="m" :value="m" />
+        </el-select>
+        <el-select v-model="filterAspiration" placeholder="送气/不送气" clearable style="width: 140px">
+          <el-option label="送气" value="送气" />
+          <el-option label="不送气" value="不送气" />
+        </el-select>
+        <el-select v-model="filterNasal" placeholder="口音/鼻音" clearable style="width: 130px">
+          <el-option label="鼻音" value="鼻音" />
+          <el-option label="口音" value="口音" />
+        </el-select>
+        <el-select v-model="filterTone" placeholder="声调" clearable style="width: 120px">
+          <el-option label="四声" value="四声" />
+          <el-option label="阴平" value="阴平" />
+        </el-select>
+        <el-button @click="clearFilters">重置</el-button>
+      </div>
+    </section>
+
+    <!-- 节点网格 -->
+    <section class="nodes-section">
+      <div v-for="layer in LAYER_ORDER" :key="layer" v-show="activeLayer === 'all' || activeLayer === layer" class="layer-block">
+        <h4 v-if="activeLayer === 'all'">{{ LAYER_LABELS[layer] }}</h4>
+        <div class="node-grid">
+          <el-card
+            v-for="node in nodesByLayer.get(layer)"
+            :key="node.id"
+            shadow="hover"
+            class="map-node"
+            :class="{ selected: selectedNode?.id === node.id }"
+            @click="selectNode(node)"
+          >
+            <div class="char">{{ node.character }}</div>
+            <div class="py">{{ node.pinyin }}</div>
+            <div class="ipa">{{ node.meta.ipa }}</div>
+          </el-card>
         </div>
       </div>
-    </div>
+      <el-empty v-if="!filteredNodes.length" description="没有符合筛选条件的节点，请调整筛选或重置。" />
+    </section>
 
-    <!-- 拼音矩阵 -->
-    <div class="matrix-container">
-      <div class="matrix-scroll">
-        <table class="pinyin-table">
-          <thead>
-            <tr>
-              <th class="corner-cell">声母＼韵母</th>
-              <th v-for="f in filteredFinals" :key="f" class="final-header">{{ f }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="initial in filteredInitials" :key="initial">
-              <td class="initial-header">{{ initial }}</td>
-              <td
-                v-for="f in filteredFinals"
-                :key="f"
-                class="pinyin-cell"
-                :class="{ available: isAvailable(initial, f), locked: !isAvailable(initial, f) }"
-                @click="handleClick(initial, f)"
-              >
-                <span v-if="isAvailable(initial, f)" class="cell-content">
-                  <span class="character">{{ getCharacter(initial, f) }}</span>
-                  <span class="pinyin">{{ initial }}{{ f }}</span>
-                </span>
-                <span v-else class="cell-dash">-</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <!-- MAP-03 节点详情 -->
+    <el-drawer v-model="drawerOpen" :title="selectedNode?.character || '发音详情'" size="420px" direction="rtl">
+      <template v-if="selectedNode">
+        <div class="detail">
+          <p class="detail-conclusion">{{ selectedNode.conclusion }}</p>
+          <dl class="detail-meta">
+            <dt>拼音</dt><dd>{{ selectedNode.pinyin }}</dd>
+            <dt>IPA</dt><dd>{{ selectedNode.meta.ipa }}</dd>
+            <dt>部位</dt><dd>{{ selectedNode.meta.place.join('、') }}</dd>
+            <dt>方法</dt><dd>{{ selectedNode.meta.method.join('、') }}</dd>
+          </dl>
+          <div class="detail-actions">
+            <el-button type="primary" @click="playDemo(selectedNode.character)">播放示范</el-button>
+            <el-button @click="router.push(`/learn/${selectedNode.unitId}`)">进入单元</el-button>
+          </div>
+          <p class="tts-note">{{ speech.disclaimer }}</p>
+
+          <!-- MAP-04 相近音比较 -->
+          <div v-if="similarNodes.length" class="similar-block">
+            <h4>相近音比较</h4>
+            <div class="similar-list">
+              <el-card v-for="s in similarNodes" :key="s.id" shadow="never" class="similar-card">
+                <strong>{{ s.character }}</strong> {{ s.pinyin }}
+                <p>{{ s.conclusion }}</p>
+                <el-button size="small" @click="router.push(`/learn/${s.unitId}`)">并排学习</el-button>
+              </el-card>
+            </div>
+          </div>
+
+          <!-- MAP-05 专业展开 -->
+          <el-collapse v-model="proExpanded" class="pro-collapse">
+            <el-collapse-item title="专业术语（点击展开）" name="pro">
+              <ul>
+                <li v-for="t in selectedNode.meta.professional" :key="t.term">
+                  <strong>{{ t.term }}</strong>：{{ t.explain }}
+                </li>
+              </ul>
+              <p class="boundary">专业内容仅供学习参考，不构成医学诊断依据。</p>
+            </el-collapse-item>
+          </el-collapse>
+        </div>
+      </template>
+    </el-drawer>
+
+    <PageFeedback page="map" type="learning" />
   </div>
 </template>
 
 <style scoped>
-.pronunciation-map {
-  background: white;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-}
-
-.map-header {
-  margin-bottom: 20px;
-}
-
-.map-header h3 {
-  margin: 0;
-  font-size: 20px;
-  color: #303133;
-}
-
-.map-header p {
-  margin: 8px 0 0;
-  color: #909399;
-  font-size: 14px;
-}
-
-.legend {
-  display: flex;
-  gap: 24px;
-  margin-bottom: 16px;
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  color: #606266;
-}
-
-.dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 3px;
-}
-
-.dot.available {
-  background: #409eff;
-}
-
-.dot.locked {
-  background: #dcdfe6;
-}
-
-.legend-note {
-  color: #909399;
-  font-size: 12px;
-}
-
-.tone-legend {
-  background: #f5f7fa;
-  border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 20px;
-}
-
-.tone-legend h4 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  color: #303133;
-}
-
-.tone-items {
-  display: flex;
-  gap: 32px;
-}
-
-.tone-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: #606266;
-}
-
-.tone-mark {
-  font-size: 20px;
-  font-weight: bold;
-}
-
-.matrix-container {
-  overflow-x: auto;
-}
-
-.matrix-scroll {
-  min-width: fit-content;
-}
-
-.pinyin-table {
-  border-collapse: collapse;
-  width: 100%;
-}
-
-.pinyin-table th,
-.pinyin-table td {
-  border: 1px solid #ebeef5;
-  text-align: center;
-  padding: 8px 4px;
-  font-size: 12px;
-}
-
-.corner-cell {
-  background: #f5f7fa;
-  font-weight: 600;
-  color: #303133;
-  white-space: nowrap;
-  position: sticky;
-  left: 0;
-  z-index: 2;
-}
-
-.final-header {
-  background: #f5f7fa;
-  font-weight: 600;
-  color: #409eff;
-  min-width: 48px;
-}
-
-.initial-header {
-  background: #f5f7fa;
-  font-weight: 600;
-  color: #67c23a;
-  position: sticky;
-  left: 0;
-  z-index: 1;
-  white-space: nowrap;
-}
-
-.pinyin-cell {
-  cursor: default;
-  transition: all 0.2s;
-  min-width: 48px;
-  height: 48px;
-}
-
-.pinyin-cell.available {
-  background: #ecf5ff;
-  cursor: pointer;
-}
-
-.pinyin-cell.available:hover {
-  background: #409eff;
-  color: white;
-  transform: scale(1.1);
-  z-index: 1;
-  position: relative;
-  border-radius: 4px;
-}
-
-.pinyin-cell.available:hover .character,
-.pinyin-cell.available:hover .pinyin {
-  color: white;
-}
-
-.cell-content {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
-.character {
-  font-size: 16px;
-  font-weight: 600;
-  color: #303133;
-}
-
-.pinyin {
-  font-size: 10px;
-  color: #909399;
-}
-
-.cell-dash {
-  color: #dcdfe6;
+.pronunciation-map { max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+.map-header h3 { margin: 0; font-size: 20px; }
+.map-header p { margin: 8px 0 0; color: #909399; font-size: 14px; }
+.card { background: #fff; border-radius: 12px; padding: 16px 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.overview h4, .filters h4, .layer-block h4 { margin: 0 0 12px; font-size: 15px; color: #303133; }
+.flow-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.flow-node { border: 1px solid #dcdfe6; background: #f5f7fa; border-radius: 8px; padding: 10px 14px; cursor: pointer; text-align: center; min-width: 72px; }
+.flow-node.active { border-color: #409eff; background: #ecf5ff; }
+.flow-label { display: block; font-weight: 600; font-size: 14px; }
+.flow-count { font-size: 12px; color: #909399; }
+.flow-arrow { color: #c0c4cc; font-size: 18px; }
+.flow-hint { margin: 12px 0 0; font-size: 13px; color: #909399; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.map-node { cursor: pointer; text-align: center; }
+.map-node.selected { border-color: #409eff; }
+.char { font-size: 28px; font-weight: 700; }
+.py { color: #409eff; font-size: 13px; margin: 4px 0; }
+.ipa { font-size: 11px; color: #909399; font-family: serif; }
+.detail-conclusion { font-size: 15px; line-height: 1.6; margin: 0 0 16px; }
+.detail-meta { display: grid; grid-template-columns: 64px 1fr; gap: 6px 12px; font-size: 14px; margin: 0 0 16px; }
+.detail-meta dt { color: #909399; }
+.detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.tts-note { font-size: 12px; color: #909399; }
+.similar-block { margin-top: 20px; }
+.similar-block h4 { margin: 0 0 10px; font-size: 14px; }
+.similar-list { display: flex; flex-direction: column; gap: 8px; }
+.similar-card p { font-size: 13px; color: #606266; margin: 6px 0; }
+.pro-collapse { margin-top: 16px; }
+.boundary { font-size: 12px; color: #909399; margin-top: 8px; }
+@media (max-width: 768px) {
+  .flow-chain { justify-content: center; }
+  .filter-row .el-select { width: 100% !important; }
 }
 </style>

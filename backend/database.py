@@ -131,6 +131,7 @@ def init_db(db_path: str = "pronunciation.db") -> None:
             """
         )
         _seed_units(conn)
+        _enrich_appendix_a_units(conn)
         conn.commit()
     finally:
         conn.close()
@@ -295,11 +296,154 @@ CORE_UNITS = [
 # 核心单元 id 集合（受保护，不可删除）
 CORE_UNITS_IDS = {u["id"] for u in CORE_UNITS}
 
+# 附录 A 12 单元：练习步骤、误区、相关单元（UNIT-05/06/09）
+APPENDIX_A_ENRICHMENT: dict[str, dict] = {
+    "a": {
+        "steps": [
+            {"title": "听示范", "text": "听 3 遍开口元音 a，注意下巴自然下落。"},
+            {"title": "感受开口", "text": "手放下巴下，确认开口约两指宽。"},
+            {"title": "慢速跟读", "text": "跟读 5 遍「啊——」，每遍约 1 秒。"},
+            {"title": "录音", "text": "清晰朗读单韵母 a，环境安静。"},
+            {"title": "看结果", "text": "对照 F1/F2 与练习建议调整。"},
+        ],
+        "mistakes": [{"title": "开口不够", "text": "声音发扁；试着再张大口。"}],
+        "related": ["i", "u_u"],
+    },
+    "i": {
+        "steps": [
+            {"title": "听示范", "text": "注意嘴角向两侧展开。"},
+            {"title": "摆口型", "text": "上下齿接近，舌面前抬。"},
+            {"title": "跟读", "text": "慢速 5 遍「衣——」。"},
+            {"title": "录音", "text": "保持口型稳定录音。"},
+            {"title": "对比", "text": "与 a 单元对比舌位高低。"},
+        ],
+        "mistakes": [{"title": "发成 u", "text": "圆唇了；嘴角再拉开。"}],
+        "related": ["a", "u_u"],
+    },
+    "u_u": {
+        "steps": [
+            {"title": "听 wu 与 yu", "text": "对比 u（舌后）与 ü（舌前）。"},
+            {"title": "圆唇", "text": "双唇收圆，注意舌位前后。"},
+            {"title": "交替", "text": "wu / yu 各 5 遍。"},
+            {"title": "录音", "text": "分别录 wu 与 yu。"},
+            {"title": "总结", "text": "记录口型与听感差异。"},
+        ],
+        "mistakes": [{"title": "u ü 混淆", "text": "ü 时舌面更靠前。"}],
+        "related": ["a", "i"],
+    },
+    "m": {
+        "steps": [
+            {"title": "听示范", "text": "感受鼻腔振动。"},
+            {"title": "鼻音验证", "text": "捏住鼻子发 m，声音应中断。"},
+            {"title": "跟读 ma", "text": "m + a 连贯 5 遍。"},
+            {"title": "录音", "text": "录「妈」或延长 m 音。"},
+            {"title": "看结果", "text": "检查鼻音与开口配合。"},
+        ],
+        "mistakes": [{"title": "口腔漏气", "text": "双唇未闭严；软腭需下降。"}],
+        "related": ["ma", "n_l"],
+    },
+    "b_p": {
+        "steps": [
+            {"title": "听 ba / pa", "text": "注意送气差异。"},
+            {"title": "手背试气", "text": "pa 有明显气流，ba 无。"},
+            {"title": "交替 5 遍", "text": "ba-pa-ba-pa。"},
+            {"title": "录音", "text": "各录一遍对比。"},
+            {"title": "总结", "text": "记录 VOT/听感差异。"},
+        ],
+        "mistakes": [{"title": "送气混淆", "text": "b 送气过多会变成 p。"}],
+        "related": ["d_t", "g_k"],
+    },
+    "d_t": {
+        "steps": [
+            {"title": "听 da / ta", "text": "舌尖抵上齿龈。"},
+            {"title": "送气对比", "text": "手背感受 ta 气流。"},
+            {"title": "交替练习", "text": "da-ta 各 5 遍。"},
+            {"title": "录音", "text": "提交对比录音。"},
+            {"title": "调整", "text": "按四步反馈重录。"},
+        ],
+        "mistakes": [{"title": "成阻部位偏后", "text": "舌位应抵上齿龈而非硬腭。"}],
+        "related": ["b_p", "n_l"],
+    },
+    "n_l": {
+        "steps": [
+            {"title": "听 na / la", "text": "n 鼻音，l 边音。"},
+            {"title": "捏鼻验证", "text": "发 n 时捏鼻声音中断。"},
+            {"title": "交替", "text": "na-la 慢速 8 遍。"},
+            {"title": "录音", "text": "各录一遍。"},
+            {"title": "对比", "text": "看识别结果与建议。"},
+        ],
+        "mistakes": [{"title": "n/l 混淆", "text": "n 气流走鼻，l 走舌侧。"}],
+        "related": ["m", "ma"],
+    },
+    "g_k": {
+        "steps": [
+            {"title": "听 ga / ka", "text": "舌根抵软腭。"},
+            {"title": "送气", "text": "ka 有明显喷气流。"},
+            {"title": "交替", "text": "ga-ka 5 遍。"},
+            {"title": "录音", "text": "提交分析。"},
+            {"title": "重录", "text": "按建议再录一次。"},
+        ],
+        "mistakes": [{"title": "部位偏前", "text": "应感到喉后上部成阻。"}],
+        "related": ["b_p", "d_t"],
+    },
+    "j_q_x": {
+        "steps": [
+            {"title": "听 ji / qi / xi", "text": "舌面前部抬向硬腭。"},
+            {"title": "口型", "text": "j/q 成阻，x 留缝摩擦。"},
+            {"title": "慢读", "text": "各 3 遍。"},
+            {"title": "录音", "text": "录目标音节。"},
+            {"title": "对比平翘舌", "text": "与 z/zh 单元对照。"},
+        ],
+        "mistakes": [{"title": "发成平舌", "text": "舌面再抬高，避免 z/c/s 部位。"}],
+        "related": ["z_zh"],
+    },
+    "z_zh": {
+        "steps": [
+            {"title": "听 za / zha", "text": "平舌 vs 翘舌。"},
+            {"title": "舌位", "text": "z 抵下齿背，zh 卷舌抵硬腭前。"},
+            {"title": "交替", "text": "za-zha 8 遍。"},
+            {"title": "录音", "text": "提交对比。"},
+            {"title": "重录", "text": "按现象调整舌位。"},
+        ],
+        "mistakes": [{"title": "翘舌不足", "text": "zh 时舌尖再上卷。"}],
+        "related": ["j_q_x", "n_l"],
+    },
+    "ma_tone": {
+        "steps": [
+            {"title": "听四声", "text": "妈麻马骂 各 2 遍。"},
+            {"title": "划轨迹", "text": "手随声调走向移动。"},
+            {"title": "连读", "text": "四声连读 3 轮。"},
+            {"title": "录音", "text": "录四声或单声。"},
+            {"title": "看 F0", "text": "对照曲线与标准走向。"},
+        ],
+        "mistakes": [{"title": "上声不到位", "text": "214 先降后升要够明显。"}],
+        "related": ["ma", "m"],
+    },
+    "ma": {
+        "steps": [
+            {"title": "听示范", "text": "妈 mā 高平调。"},
+            {"title": "分解", "text": "m（鼻音）+ a（开口）+ 高平调。"},
+            {"title": "跟读 5 遍", "text": "慢速后正常语速。"},
+            {"title": "录音", "text": "完成检测闭环。"},
+            {"title": "再录", "text": "按四步反馈调整后重录。"},
+        ],
+        "mistakes": [
+            {"title": "声调下掉", "text": "阴平应保持高平，结尾勿掉调。"},
+            {"title": "鼻音不足", "text": "双唇闭合，软腭降。"},
+        ],
+        "related": ["m", "a", "ma_tone"],
+    },
+}
+
 
 def _seed_units(conn: sqlite3.Connection) -> None:
     """播种核心发音单元（幂等：仅插入不存在的单元）"""
     now = _now()
     for idx, u in enumerate(CORE_UNITS):
+        enrich = APPENDIX_A_ENRICHMENT.get(u["id"], {})
+        steps = json.dumps(enrich.get("steps", []), ensure_ascii=False)
+        mistakes = json.dumps(enrich.get("mistakes", []), ensure_ascii=False)
+        related = json.dumps(enrich.get("related", []), ensure_ascii=False)
         exists = conn.execute("SELECT 1 FROM pronunciation_units WHERE id = ?", (u["id"],)).fetchone()
         if exists:
             continue
@@ -307,9 +451,37 @@ def _seed_units(conn: sqlite3.Connection) -> None:
             """INSERT INTO pronunciation_units
                (id, pinyin, character, category, description, conclusion, detail, mistakes, steps,
                 related, status, verified, order_no, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, '[]', '[]', '[]', 'published', ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?)""",
             (u["id"], u["pinyin"], u["character"], u["category"], "", u["conclusion"], u["detail"],
-             u["verified"], idx + 1, now, now),
+             mistakes, steps, related, u["verified"], idx + 1, now, now),
+        )
+    _enrich_appendix_a_units(conn)
+
+
+def _enrich_appendix_a_units(conn: sqlite3.Connection) -> None:
+    """为已存在的附录 A 单元补全 steps/mistakes/related（仅当为空时）"""
+    now = _now()
+    for uid, enrich in APPENDIX_A_ENRICHMENT.items():
+        row = conn.execute(
+            "SELECT steps, mistakes, related FROM pronunciation_units WHERE id = ?", (uid,)
+        ).fetchone()
+        if not row:
+            continue
+        steps = row["steps"] or "[]"
+        mistakes = row["mistakes"] or "[]"
+        related = row["related"] or "[]"
+        if steps != "[]" and mistakes != "[]" and related != "[]":
+            continue
+        conn.execute(
+            """UPDATE pronunciation_units SET steps=?, mistakes=?, related=?, updated_at=?
+               WHERE id=? AND (steps='[]' OR mistakes='[]' OR related='[]')""",
+            (
+                json.dumps(enrich.get("steps", []), ensure_ascii=False) if steps == "[]" else steps,
+                json.dumps(enrich.get("mistakes", []), ensure_ascii=False) if mistakes == "[]" else mistakes,
+                json.dumps(enrich.get("related", []), ensure_ascii=False) if related == "[]" else related,
+                now,
+                uid,
+            ),
         )
 
 

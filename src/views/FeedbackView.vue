@@ -7,6 +7,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { getUnitMeta } from '@/data/pinyinUnits'
+import PageFeedback from '@/components/PageFeedback.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -559,11 +560,11 @@ function initToneChart() {
   if (existing) existing.dispose()
   const chart = echarts.init(toneChartRef.value)
 
-  const userF0 = assessment.value?.audioAnalysis.f0 || []
+  const userF0 = assessment.value?.audioAnalysis?.f0 || []
   // 标准曲线：优先使用后端返回的 standardF0，无数据时基于识别声调在前端生成兜底曲线
-  let standardF0 = assessment.value?.audioAnalysis.standardF0 || []
+  let standardF0 = assessment.value?.audioAnalysis?.standardF0 || []
   if (standardF0.length === 0 && userF0.length > 0) {
-    const tone = assessment.value?.audioAnalysis.detectedTone || 1
+    const tone = assessment.value?.audioAnalysis?.detectedTone || 1
     standardF0 = userF0.map((_, i) => {
       const t = i / userF0.length
       if (tone === 2) return 120 + t * 80
@@ -604,7 +605,7 @@ function initSpectrogram() {
   // 用后端返回的真实MFCC数据生成频谱图（无假数据回退）
   const timeSteps = 100
   const freqBins = 80
-  const mfcc = assessment.value?.audioAnalysis.mfcc || []
+  const mfcc = assessment.value?.audioAnalysis?.mfcc || []
 
   // 若后端未返回MFCC数据，显示空白并标注
   const hasMfcc = mfcc.length > 0 && (mfcc[0]?.length ?? 0) > 0
@@ -650,8 +651,8 @@ function initFormantChart() {
   if (existing) existing.dispose()
   const chart = echarts.init(formantChartRef.value)
 
-  const f1Data = assessment.value?.audioAnalysis.f1 || []
-  const f2Data = assessment.value?.audioAnalysis.f2 || []
+  const f1Data = assessment.value?.audioAnalysis?.f1 || []
+  const f2Data = assessment.value?.audioAnalysis?.f2 || []
 
   // 采样减少点数
   const step = Math.max(1, Math.floor(f1Data.length / 30))
@@ -707,9 +708,9 @@ function initEnergyChart() {
   if (existing) existing.dispose()
   const chart = echarts.init(energyChartRef.value)
 
-  const energy = assessment.value?.audioAnalysis.energy || []
+  const energy = assessment.value?.audioAnalysis?.energy || []
   const labels = energy.map((_, i) => i)
-  const duration = assessment.value?.audioAnalysis.duration || 1.5
+  const duration = assessment.value?.audioAnalysis?.duration || 1.5
 
   chart.setOption({
     title: { text: '能量包络图', left: 'center', textStyle: { fontSize: 14 } },
@@ -784,8 +785,52 @@ watch(
 
 <template>
   <div class="feedback-view">
-    <!-- 综合评分 -->
-    <div class="score-section">
+    <!-- 录音质量 / 结论 / 可靠性 / 边界 -->
+    <div class="result-meta card-block">
+      <el-alert
+        v-if="assessment && !assessment.evaluable"
+        type="warning"
+        :title="assessment.quality?.summary || '录音质量不达标'"
+        description="当前录音无法可靠评价。请按下方提示调整环境后重录。"
+        show-icon
+        :closable="false"
+      />
+      <div v-if="assessment && !assessment.evaluable" class="unevaluable-actions">
+        <el-button type="danger" @click="router.push(`/learn/${unitId}`)">返回单元重录</el-button>
+        <el-button @click="router.push(`/test?unit=${unitId}`)">在检测中心重录</el-button>
+      </div>
+      <template v-else-if="assessment">
+        <p class="headline-label">当前任务结论</p>
+        <h2 class="headline">{{ assessment.headline || assessment.feedback[0]?.phenomenon || '分析完成' }}</h2>
+        <el-tag :type="assessment.reliability === 'reliable' ? 'success' : assessment.reliability === 'reference_only' ? 'warning' : 'info'">
+          {{ { reliable: '结果可靠', reference_only: '仅供参考', not_available: '暂不评价' }[assessment.reliability] }}
+        </el-tag>
+        <p class="reliability-note">{{ assessment.reliabilityNote }}</p>
+      </template>
+
+      <div v-if="assessment?.quality?.items?.length" class="quality-list">
+        <h4>录音质量</h4>
+        <div v-for="item in assessment.quality.items" :key="item.key" class="quality-item" :class="item.status">
+          <strong>{{ item.label }}</strong> — {{ item.message }}
+        </div>
+      </div>
+
+      <el-alert v-if="assessment?.boundary?.statement" type="info" :title="assessment.boundary.statement" show-icon :closable="false" class="boundary" />
+    </div>
+
+    <!-- 四步反馈（仅可评价时） -->
+    <div v-if="assessment?.evaluable && assessment?.feedback?.length" class="four-step card-block">
+      <h3>练习建议（四步反馈）</h3>
+      <div v-for="(item, idx) in assessment.feedback" :key="idx" class="step-item" :class="item.type">
+        <p><strong>① 现象</strong>{{ item.phenomenon || item.message }}</p>
+        <p><strong>② 可能环节</strong>{{ item.link || item.detail }}</p>
+        <p><strong>③ 可感知提示</strong>{{ item.hint }}</p>
+        <p><strong>④ 安全短练习</strong>{{ item.practice || item.improvement }}</p>
+      </div>
+    </div>
+
+    <!-- 综合评分（辅参考，非主结论） -->
+    <div v-if="assessment?.evaluable" class="score-section">
       <div class="score-ring">
         <el-progress type="circle" :percentage="Math.round(assessment?.score || 0)" :color="scoreColor" :width="140" :stroke-width="12">
           <template #default="{ percentage }">
@@ -804,10 +849,10 @@ watch(
     </div>
 
     <!-- 音素级分析（深度学习识别结果） -->
-    <div class="phoneme-section" v-if="assessment?.audioAnalysis.phonemes?.length">
+    <div class="phoneme-section" v-if="assessment?.evaluable && assessment?.audioAnalysis?.phonemes?.length">
       <h3>音素级分析 <small>基于 Wav2Vec2 深度学习模型识别</small></h3>
       <div class="phoneme-list">
-        <div v-for="(p, idx) in assessment.audioAnalysis.phonemes" :key="idx" class="phoneme-item" :class="p.score >= 80 ? 'good' : (p.score >= 60 ? 'warn' : 'bad')">
+        <div v-for="(p, idx) in assessment!.audioAnalysis!.phonemes" :key="idx" class="phoneme-item" :class="p.score >= 80 ? 'good' : (p.score >= 60 ? 'warn' : 'bad')">
           <div class="phoneme-name">{{ p.phoneme }}</div>
           <div class="phoneme-compare">
             <span class="expected">目标：{{ p.expected }}</span>
@@ -820,16 +865,16 @@ watch(
           <p class="phoneme-feedback">{{ p.feedback }}</p>
         </div>
       </div>
-      <div class="phoneme-summary" v-if="assessment.audioAnalysis.recognizedText">
+      <div class="phoneme-summary" v-if="assessment?.audioAnalysis?.recognizedText">
         <span class="label">识别文本：</span>
-        <span class="value">{{ assessment.audioAnalysis.recognizedText }}</span>
+        <span class="value">{{ assessment!.audioAnalysis!.recognizedText }}</span>
         <span class="label">识别声调：</span>
-        <span class="value">第{{ assessment.audioAnalysis.detectedTone || '（依据F0判定）' }}声</span>
+        <span class="value">第{{ assessment!.audioAnalysis!.detectedTone || '（依据F0判定）' }}声</span>
       </div>
     </div>
 
-    <!-- 声调曲线 + 3D动画 -->
-    <div class="analysis-row">
+    <!-- 声调曲线 + 3D动画（仅可评价时展示） -->
+    <div v-if="assessment?.evaluable && assessment?.audioAnalysis" class="analysis-row">
       <div class="chart-card">
         <div ref="toneChartRef" class="chart-container"></div>
       </div>
@@ -839,8 +884,8 @@ watch(
       </div>
     </div>
 
-    <!-- 声谱图 + 共振峰 + 能量图 -->
-    <div class="analysis-row three-col">
+    <!-- 声谱图 + 共振峰 + 能量图（仅可评价时展示） -->
+    <div v-if="assessment?.evaluable && assessment?.audioAnalysis" class="analysis-row three-col">
       <div class="chart-card">
         <h4>声谱图（语谱图）</h4>
         <canvas ref="spectrogramRef" class="spectrogram-canvas"></canvas>
@@ -854,8 +899,8 @@ watch(
       </div>
     </div>
 
-    <!-- 反馈建议 -->
-    <div class="feedback-section">
+    <!-- 反馈建议（兼容旧展示，四步反馈已在上方） -->
+    <div v-if="false" class="feedback-section">
       <h3>改进建议</h3>
       <div class="feedback-list">
         <div v-for="(item, idx) in (assessment?.feedback || [])" :key="idx" class="feedback-item" :class="item.type">
@@ -873,14 +918,32 @@ watch(
 
     <!-- 操作按钮 -->
     <div class="action-bar">
-      <el-button :icon="'Refresh'" size="large" @click="router.push(`/learn/${unitId}`)">重新录音</el-button>
-      <el-button type="primary" :icon="'Back'" size="large" @click="router.push('/library')">返回发音库</el-button>
+      <el-button :icon="'Refresh'" size="large" @click="router.push(`/learn/${unitId}`)">再次录音</el-button>
+      <el-button v-if="assessment?.evaluable" type="success" :icon="'VideoPlay'" size="large" @click="router.push(`/learn/${unitId}`)">开始练习</el-button>
+      <el-button type="primary" plain size="large" @click="router.push('/archive')">保存到档案</el-button>
+      <el-button :icon="'Back'" size="large" @click="router.push('/library')">返回发音库</el-button>
     </div>
+
+    <PageFeedback :page="`feedback/${unitId}`" :unit-id="unitId" type="result" />
   </div>
 </template>
 
 <style scoped>
 .feedback-view { display: flex; flex-direction: column; gap: 20px; }
+.card-block { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06); }
+.headline-label { font-size: 13px; color: #909399; margin: 0; }
+.headline { margin: 8px 0 12px; font-size: 20px; color: #303133; }
+.reliability-note { font-size: 13px; color: #606266; margin-top: 8px; }
+.quality-list { margin-top: 16px; }
+.quality-item { font-size: 13px; padding: 6px 0; }
+.quality-item.fail { color: #f56c6c; }
+.four-step h3 { margin: 0 0 12px; }
+.step-item { padding: 12px; margin-bottom: 8px; border-radius: 8px; background: #f5f7fa; font-size: 13px; }
+.step-item.error { background: #fef0f0; }
+.step-item.warning { background: #fdf6ec; }
+.step-item p { margin: 4px 0; }
+.boundary { margin-top: 12px; }
+.unevaluable-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
 .score-section { background: white; border-radius: 12px; padding: 24px; display: flex; align-items: center; gap: 40px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); }
 .score-ring { flex-shrink: 0; }
 .score-inner { text-align: center; }
