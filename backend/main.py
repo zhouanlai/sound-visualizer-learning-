@@ -32,12 +32,13 @@ if any(m in _pythonpath.lower() for m in _shim_markers):
 
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 import librosa
 import torch
 
 import database
+import llm_service
 from audio_analyzer import (
     analyze_with_deep_learning,
     analyze_audio_quality,
@@ -409,6 +410,53 @@ async def load_asr_endpoint():
     """手动触发深度学习模型加载（可选，用于预热）"""
     ok = load_asr_model()
     return {"code": 200, "data": {"loaded": ok, **asr_status()}}
+
+
+# ---------------------------------------------------------------------------
+# 本地大模型对话（Ollama，Z 组）
+# ---------------------------------------------------------------------------
+class ChatMessage(BaseModel):
+    role: str = "user"          # system / user / assistant
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    temperature: float = 0.7
+
+
+@app.post("/api/llm/chat")
+def llm_chat(req: ChatRequest):
+    """本地大模型对话（转发 Ollama），返回模型结果 JSON"""
+    if not llm_service.is_available():
+        return JSONResponse(
+            status_code=503,
+            content={"code": 503, "message": "本地大模型服务（Ollama）未运行，请先启动"},
+        )
+    try:
+        reply = llm_service.chat(
+            [m.model_dump() for m in req.messages], temperature=req.temperature
+        )
+        return {"code": 200, "data": {"model": llm_service.OLLAMA_MODEL, "reply": reply}}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": f"大模型调用失败: {str(e)}"},
+        )
+
+
+@app.post("/api/llm/chat/stream")
+def llm_chat_stream(req: ChatRequest):
+    """本地大模型流式对话（SSE），逐段返回回复文本，供前端打字机效果"""
+    def gen():
+        try:
+            for piece in llm_service.chat_stream(
+                [m.model_dump() for m in req.messages], temperature=req.temperature
+            ):
+                yield f"data: {json.dumps({'content': piece}, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
 
 class UserProgress(BaseModel):
     userId: str
